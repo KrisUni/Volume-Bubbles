@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import type { ChartHandle } from './Chart';
 import { useStore } from '../lib/config';
 
@@ -9,6 +10,14 @@ function fmtUSD(v: number): string {
   if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(2)}M`;
   if (v >= 1_000) return `$${(v / 1_000).toFixed(1)}K`;
   return `$${v.toFixed(0)}`;
+}
+
+function fmtQty(qty: number): string {
+  if (qty >= 1_000_000) return `${(qty / 1_000_000).toFixed(2)}M`;
+  if (qty >= 1_000) return `${(qty / 1_000).toFixed(1)}k`;
+  if (qty >= 100) return qty.toFixed(0);
+  if (qty >= 10) return qty.toFixed(2);
+  return qty.toFixed(4);
 }
 
 function fmtTime(ts: number): string {
@@ -29,6 +38,15 @@ export default function TradesLog({ chartRef }: Props) {
   const selectBubble = useStore((s) => s.selectBubble);
   const clearTradesLog = useStore((s) => s.clearTradesLog);
   const closePanel = useStore((s) => s.closePanel);
+
+  const listRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll to selected trade when bubble clicked on chart
+  useEffect(() => {
+    if (!selectedId || !listRef.current) return;
+    const el = listRef.current.querySelector('.trade-row.selected');
+    el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }, [selectedId]);
 
   if (!tradesPanelOpen) return null;
 
@@ -51,7 +69,7 @@ export default function TradesLog({ chartRef }: Props) {
         </div>
       </div>
 
-      <div className="trades-list">
+      <div className="trades-list" ref={listRef}>
         {tradesLog.length === 0 && (
           <div className="trades-empty">No big trades detected yet.</div>
         )}
@@ -73,7 +91,7 @@ export default function TradesLog({ chartRef }: Props) {
             </div>
             <div className="trade-row-bot">
               <span className="trade-price">${t.price.toLocaleString()}</span>
-              <span className="trade-qty">{t.qty.toFixed(4)}</span>
+              <span className="trade-qty">{fmtQty(t.qty)}</span>
               {t.pattern && (
                 <span
                   className="trade-pattern"

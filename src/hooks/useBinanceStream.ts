@@ -53,6 +53,7 @@ export function useBinanceStream(
   const addBubble = useStore((s) => s.addBubble);
   const addToTradesLog = useStore((s) => s.addToTradesLog);
   const setBubbles = useStore((s) => s.setBubbles);
+  const replaceBubbles = useStore((s) => s.replaceBubbles);
   const setTradesLog = useStore((s) => s.setTradesLog);
   const clearBubbles = useStore((s) => s.clearBubbles);
   const clearTradesLog = useStore((s) => s.clearTradesLog);
@@ -60,6 +61,8 @@ export function useBinanceStream(
 
   const wsRef = useRef<WebSocket[]>([]);
   const candlesRef = useRef<Map<number, Candle>>(new Map());
+  // Last CLOSED candle — used for pattern classification so OHLC is final
+  const closedCandleRef = useRef<Candle | null>(null);
 
   useEffect(() => {
     clearBubbles();
@@ -143,11 +146,19 @@ export function useBinanceStream(
         const trades = await getAutoCachedTrades(symbol);
         if (trades.length === 0) return;
 
+        // Apply active filters at load time — same logic as rederive effect
+        const { minUsdFilter, minQtyFilter } = useStore.getState();
+        const filtered = trades.filter((t) => {
+          if (minUsdFilter > 0 && t.usdValue < minUsdFilter) return false;
+          if (minQtyFilter > 0 && t.qty < minQtyFilter) return false;
+          return true;
+        });
+
         const intervalSecs = INTERVAL_SECS[interval] ?? 60;
 
         // Remap trade.time (raw seconds) to the current interval's candle bucket
         // so bubbles align correctly regardless of which timeframe is active
-        const restoredBubbles: Bubble[] = trades.map((trade) => ({
+        const restoredBubbles: Bubble[] = filtered.map((trade) => ({
           id: trade.id,
           time: Math.floor(trade.time / intervalSecs) * intervalSecs,
           price: trade.price,
@@ -161,7 +172,7 @@ export function useBinanceStream(
         }));
 
         setBubbles(restoredBubbles);
-        setTradesLog(trades);
+        setTradesLog(filtered);
       } catch (e) {
         console.error('loadAutoCached error', e);
       }
@@ -216,6 +227,7 @@ export function useBinanceStream(
       currentCandleRef.current = candle;
 
       if (k.x) {
+        closedCandleRef.current = candle; // lock in final OHLC for classification
         chartRef.current?.addCandle(candle);
         mergeCandleIntoHistory(symbol, interval, candle).catch(console.error);
         // Checkpoint detector window on every closed candle
@@ -240,8 +252,9 @@ export function useBinanceStream(
       const result = detector.processTrade(rawTrade);
       if (!result) return;
 
-      const { minUsdFilter } = useStore.getState();
+      const { minUsdFilter, minQtyFilter } = useStore.getState();
       if (minUsdFilter > 0 && result.usdValue < minUsdFilter) return;
+      if (minQtyFilter > 0 && rawTrade.qty < minQtyFilter) return;
 
       const candle = currentCandleRef.current;
       if (!candle) return;
@@ -249,7 +262,10 @@ export function useBinanceStream(
       const intervalSecs = INTERVAL_SECS[interval] ?? 60;
       const candleTime = Math.floor(rawTrade.timestamp / 1000 / intervalSecs) * intervalSecs;
 
-      const classification = showPatterns ? classifyTrade(result, candle) : {};
+      // Classify against CLOSED candle (final OHLC); fall back to live candle if no close yet
+      // Read showPatterns from store directly — avoids stale closure (effect runs on [symbol, interval] only)
+      const classifyCandle = closedCandleRef.current ?? candle;
+      const classification = useStore.getState().showPatterns ? classifyTrade(result, classifyCandle) : {};
 
       const id = `binance-${t.a}-${t.T}`;
       const tradeTime = Math.floor(rawTrade.timestamp / 1000);
@@ -296,4 +312,36 @@ export function useBinanceStream(
       if (w && w.length > 0) saveDetectorWindow(symbol, interval, w).catch(console.error);
     };
   }, [symbol, interval]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Re-derive bubbles from DB whenever minUsdFilter or minQtyFilter changes.
+  // DB is source of truth; bubbles = filtered view of stored trades.
+  const minUsdFilter = useStore((s) => s.minUsdFilter);
+  const minQtyFilter = useStore((s) => s.minQtyFilter);
+  useEffect(() => {
+    if (!autoLoadTrades) return;
+    async function rederive() {
+      const trades = await getAutoCachedTrades(symbol);
+      const intervalSecs = INTERVAL_SECS[interval] ?? 60;
+      const filtered = trades.filter((t) => {
+        if (minUsdFilter > 0 && t.usdValue < minUsdFilter) return false;
+        if (minQtyFilter > 0 && t.qty < minQtyFilter) return false;
+        return true;
+      });
+      const rederived: Bubble[] = filtered.map((trade) => ({
+        id: trade.id,
+        time: Math.floor(trade.time / intervalSecs) * intervalSecs,
+        price: trade.price,
+        qty: trade.qty,
+        usdValue: trade.usdValue,
+        isMaker: trade.isMaker,
+        pattern: trade.pattern,
+        patternSignal: trade.patternSignal,
+        exchange: trade.exchange,
+        birthMs: 0,
+      }));
+      replaceBubbles(rederived); // direct replace — no merge, so filtered-out bubbles don't leak back
+      setTradesLog(filtered);
+    }
+    rederive().catch(console.error);
+  }, [minUsdFilter, minQtyFilter]); // eslint-disable-line react-hooks/exhaustive-deps
 }

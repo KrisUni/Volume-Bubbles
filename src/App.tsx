@@ -20,6 +20,10 @@ function App() {
   const detectorRef = useRef<Detector | null>(new Detector());
   const currentCandleRef = useRef<Candle | null>(null);
 
+  const anyPanelOpen = useStore(
+    (s) => s.tradesPanelOpen || s.settingsPanelOpen || s.sessionPanelOpen,
+  );
+
   const detectionThreshold = useStore((s) => s.detectionThreshold);
   useEffect(() => {
     detectorRef.current?.setThreshold(detectionThreshold);
@@ -43,13 +47,14 @@ function App() {
       </ErrorBoundary>
 
       <div className="main">
-        <ErrorBoundary label="Chart">
-          <Chart ref={chartRef} />
-        </ErrorBoundary>
+        <div className="chart-wrap">
+          <ErrorBoundary label="Chart">
+            <Chart ref={chartRef} />
+          </ErrorBoundary>
+          <Legend />
+        </div>
 
-        <Legend />
-
-        <div className="panels">
+        <div className={`panels${anyPanelOpen ? ' panels-open' : ''}`}>
           <ErrorBoundary label="TradesLog">
             <TradesLog chartRef={chartRef} />
           </ErrorBoundary>

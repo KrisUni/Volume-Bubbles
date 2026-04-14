@@ -6,13 +6,22 @@ export default function SettingsPanel() {
   const autoLoadTrades = useStore((s) => s.autoLoadTrades);
   const detectionThreshold = useStore((s) => s.detectionThreshold);
   const minUsdFilter = useStore((s) => s.minUsdFilter);
+  const minQtyFilter = useStore((s) => s.minQtyFilter);
+  const showContractQty = useStore((s) => s.showContractQty);
+  const showVolumeProfile = useStore((s) => s.showVolumeProfile);
   const setShowPatterns = useStore((s) => s.setShowPatterns);
   const setAutoLoadTrades = useStore((s) => s.setAutoLoadTrades);
   const setDetectionThreshold = useStore((s) => s.setDetectionThreshold);
   const setMinUsdFilter = useStore((s) => s.setMinUsdFilter);
+  const setMinQtyFilter = useStore((s) => s.setMinQtyFilter);
+  const setShowContractQty = useStore((s) => s.setShowContractQty);
+  const setShowVolumeProfile = useStore((s) => s.setShowVolumeProfile);
   const closePanel = useStore((s) => s.closePanel);
 
   if (!settingsPanelOpen) return null;
+
+  const usdActive = minUsdFilter > 0;
+  const qtyActive = minQtyFilter > 0;
 
   return (
     <div className="side-panel">
@@ -46,24 +55,70 @@ export default function SettingsPanel() {
           </div>
         </div>
 
-        {/* ── Min USD filter ── */}
+        {/* ── Filters — mutually exclusive ── */}
         <div className="setting-group">
-          <div className="setting-group-label">Minimum trade size</div>
-          <div className="setting-row-slider">
-            <span style={{ fontSize: 11, color: 'var(--text-dim)', minWidth: 28 }}>$</span>
+          <div className="setting-group-label">Trade filter</div>
+          <div className="setting-hint" style={{ marginBottom: 8 }}>
+            Pick one filter mode. Only bubbles AND trades above the threshold are shown.
+          </div>
+
+          {/* USD filter row */}
+          <label className="setting-row" style={{ alignItems: 'center', marginBottom: 6 }}>
+            <input
+              type="radio"
+              name="filter-mode"
+              checked={usdActive}
+              onChange={() => { setMinUsdFilter(50_000); setMinQtyFilter(0); }}
+            />
+            <span style={{ minWidth: 130 }}>Min trade size (USD)</span>
             <input
               type="number"
               min="0"
               step="1000"
               value={minUsdFilter}
+              disabled={!usdActive}
               onChange={(e) => setMinUsdFilter(Math.max(0, parseFloat(e.target.value) || 0))}
               className="min-usd-input"
-              placeholder="0"
+              style={{ opacity: usdActive ? 1 : 0.4, width: 90 }}
+              placeholder="50000"
             />
-          </div>
-          <div className="setting-hint">
-            Hard minimum in USD. Trades below this are never shown even if statistically outlier.
-            Set 0 to disable.
+          </label>
+
+          {/* Contracts filter row */}
+          <label className="setting-row" style={{ alignItems: 'center', marginBottom: 6 }}>
+            <input
+              type="radio"
+              name="filter-mode"
+              checked={qtyActive}
+              onChange={() => { setMinQtyFilter(1); setMinUsdFilter(0); }}
+            />
+            <span style={{ minWidth: 130 }}>Min contracts (qty)</span>
+            <input
+              type="number"
+              min="0"
+              step="0.1"
+              value={minQtyFilter}
+              disabled={!qtyActive}
+              onChange={(e) => setMinQtyFilter(Math.max(0, parseFloat(e.target.value) || 0))}
+              className="min-usd-input"
+              style={{ opacity: qtyActive ? 1 : 0.4, width: 90 }}
+              placeholder="1"
+            />
+          </label>
+
+          {/* No filter */}
+          <label className="setting-row" style={{ alignItems: 'center' }}>
+            <input
+              type="radio"
+              name="filter-mode"
+              checked={!usdActive && !qtyActive}
+              onChange={() => { setMinUsdFilter(0); setMinQtyFilter(0); }}
+            />
+            <span>No filter (show all outliers)</span>
+          </label>
+
+          <div className="setting-hint" style={{ marginTop: 6 }}>
+            For BTC: 1 contract = 1 BTC (base-asset qty from aggTrade).
           </div>
         </div>
 
@@ -75,6 +130,26 @@ export default function SettingsPanel() {
             onChange={(e) => setShowPatterns(e.target.checked)}
           />
           <span>Show pattern classification</span>
+        </label>
+
+        {/* ── Show contract qty on bubbles ── */}
+        <label className="setting-row">
+          <input
+            type="checkbox"
+            checked={showContractQty}
+            onChange={(e) => setShowContractQty(e.target.checked)}
+          />
+          <span>Show contract qty on bubbles</span>
+        </label>
+
+        {/* ── Volume profile ── */}
+        <label className="setting-row">
+          <input
+            type="checkbox"
+            checked={showVolumeProfile}
+            onChange={(e) => setShowVolumeProfile(e.target.checked)}
+          />
+          <span>Show volume profile</span>
         </label>
 
         {/* ── Auto-load ── */}

@@ -28,17 +28,46 @@ const BUBBLE_ALPHA = 0.75;
 const SELECTED_ALPHA = 0.95;
 const PULSE_DURATION_MS = 3000;
 
-function signalColor(
-  b: Bubble,
-  alpha: number,
-): string {
+// Better-spread radius: ~8px at $10k, 15px at $100k, 30px at $1M, 45px at $10M, 60px at $100M
+function bubbleRadius(usdValue: number): number {
+  return Math.max(8, Math.min(60, (Math.log10(Math.max(usdValue, 10_000)) - 4) * 15));
+}
+
+function fmtQty(qty: number): string {
+  if (qty >= 1_000_000) return `${(qty / 1_000_000).toFixed(1)}M`;
+  if (qty >= 1_000) return `${(qty / 1_000).toFixed(1)}k`;
+  if (qty >= 100) return qty.toFixed(0);
+  if (qty >= 10) return qty.toFixed(1);
+  return qty.toFixed(2);
+}
+
+// Heatmap color: 0=cold blue → 0.5=green → 0.75=orange → 1=hot red
+function heatColor(t: number, alpha: number): string {
+  const stops: [number, [number, number, number]][] = [
+    [0.00, [20,  60,  160]],
+    [0.30, [20,  160, 120]],
+    [0.60, [200, 140,  20]],
+    [1.00, [220,  40,  20]],
+  ];
+  let lo = stops[0], hi = stops[stops.length - 1];
+  for (let i = 0; i < stops.length - 1; i++) {
+    if (t >= stops[i][0] && t <= stops[i + 1][0]) { lo = stops[i]; hi = stops[i + 1]; break; }
+  }
+  const f = hi[0] > lo[0] ? (t - lo[0]) / (hi[0] - lo[0]) : 0;
+  const r = Math.round(lo[1][0] + f * (hi[1][0] - lo[1][0]));
+  const g = Math.round(lo[1][1] + f * (hi[1][1] - lo[1][1]));
+  const b = Math.round(lo[1][2] + f * (hi[1][2] - lo[1][2]));
+  return `rgba(${r},${g},${b},${alpha.toFixed(2)})`;
+}
+
+function signalColor(b: Bubble, alpha: number): string {
   // buyer = green, seller = red; pattern overrides
   if (b.patternSignal === 'bullish') return `rgba(34,197,94,${alpha})`;
   if (b.patternSignal === 'bearish') return `rgba(239,68,68,${alpha})`;
   if (b.patternSignal === 'caution') return `rgba(234,179,8,${alpha})`;
   return b.isMaker
-    ? `rgba(239,68,68,${alpha})`  // seller = red
-    : `rgba(34,197,94,${alpha})`; // buyer = green
+    ? `rgba(239,68,68,${alpha})`  // seller / passive = red
+    : `rgba(34,197,94,${alpha})`; // buyer / aggressive = green
 }
 
 const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
@@ -48,9 +77,108 @@ const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
   const vwapSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animFrameRef = useRef<number | null>(null);
+  const candlesForProfileRef = useRef<Candle[]>([]);
 
   const bubbles = useStore((s) => s.bubbles);
   const selectedId = useStore((s) => s.selectedBubbleId);
+  const showVolumeProfile = useStore((s) => s.showVolumeProfile);
+  const showContractQty = useStore((s) => s.showContractQty);
+
+  // Draw volume profile from candle data as a left-edge overlay
+  const drawVolumeProfile = useCallback((
+    ctx: CanvasRenderingContext2D,
+    chart: IChartApi,
+    candleSeries: ISeriesApi<'Candlestick'>,
+    canvasEl: HTMLCanvasElement,
+  ) => {
+    const candles = candlesForProfileRef.current;
+    if (candles.length === 0) return;
+
+    const visibleRange = chart.timeScale().getVisibleRange();
+    if (!visibleRange) return;
+
+    const fromT = visibleRange.from as number;
+    const toT = visibleRange.to as number;
+    const visible = candles.filter((c) => (c.time as number) >= fromT && (c.time as number) <= toT);
+    if (visible.length === 0) return;
+
+    // Price bounds from visible candles
+    const priceMin = visible.reduce((m, c) => Math.min(m, c.low ?? c.close), Infinity);
+    const priceMax = visible.reduce((m, c) => Math.max(m, c.high ?? c.close), -Infinity);
+    if (priceMax <= priceMin) return;
+
+    const NUM_LEVELS = 60;
+    const bins = new Float64Array(NUM_LEVELS);
+
+    for (const c of visible) {
+      const low = c.low ?? c.close;
+      const high = c.high ?? c.close;
+      const vol = c.volume ?? 0;
+      if (vol === 0 || high === low) {
+        // Point candle — add to nearest bin
+        const i = Math.min(NUM_LEVELS - 1, Math.floor(((c.close - priceMin) / (priceMax - priceMin)) * NUM_LEVELS));
+        bins[i] += vol;
+        continue;
+      }
+      for (let i = 0; i < NUM_LEVELS; i++) {
+        const binLow = priceMin + (i / NUM_LEVELS) * (priceMax - priceMin);
+        const binHigh = priceMin + ((i + 1) / NUM_LEVELS) * (priceMax - priceMin);
+        const overlap = Math.max(0, Math.min(high, binHigh) - Math.max(low, binLow));
+        if (overlap > 0) bins[i] += vol * (overlap / (high - low));
+      }
+    }
+
+    const maxBin = Math.max(...bins);
+    if (maxBin === 0) return;
+
+    // POC = index with highest volume
+    let pocIndex = 0;
+    for (let i = 1; i < NUM_LEVELS; i++) {
+      if (bins[i] > bins[pocIndex]) pocIndex = i;
+    }
+
+    const maxBarWidth = Math.min(canvasEl.width * 0.14, 110);
+
+    for (let i = 0; i < NUM_LEVELS; i++) {
+      if (bins[i] === 0) continue;
+      const binLowPrice = priceMin + (i / NUM_LEVELS) * (priceMax - priceMin);
+      const binHighPrice = priceMin + ((i + 1) / NUM_LEVELS) * (priceMax - priceMin);
+
+      const yTop = candleSeries.priceToCoordinate(binHighPrice);
+      const yBot = candleSeries.priceToCoordinate(binLowPrice);
+      if (yTop === null || yBot === null) continue;
+
+      const barH = Math.max(1, Math.abs(yBot - yTop));
+      const barW = (bins[i] / maxBin) * maxBarWidth;
+      const yDraw = Math.min(yTop, yBot);
+
+      const isPOC = i === pocIndex;
+      const intensity = bins[i] / maxBin; // 0–1
+      const baseAlpha = isPOC ? 0.75 : 0.20 + intensity * 0.35;
+      const fillColor = isPOC ? 'rgba(255,210,40,0.80)' : heatColor(intensity, baseAlpha);
+
+      // Horizontal gradient: solid at left edge, fades to transparent at bar tip
+      const grad = ctx.createLinearGradient(0, 0, barW, 0);
+      grad.addColorStop(0, fillColor);
+      grad.addColorStop(1, fillColor.replace(/[\d.]+\)$/, '0)'));
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, yDraw, barW, barH);
+
+      if (isPOC) {
+        const pocY = (yTop + yBot) / 2;
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255,210,50,0.65)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 6]);
+        ctx.beginPath();
+        ctx.moveTo(0, pocY);
+        ctx.lineTo(canvasEl.width, pocY);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+    }
+  }, []);
 
   // Draw bubbles on canvas overlay
   const drawBubbles = useCallback(() => {
@@ -64,6 +192,11 @@ const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+    // Volume profile behind bubbles
+    if (showVolumeProfile) {
+      drawVolumeProfile(ctx, chart, candleSeries, canvas);
+    }
+
     const now = Date.now();
     const ts = chart.timeScale();
 
@@ -72,19 +205,18 @@ const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
       const y = candleSeries.priceToCoordinate(b.price);
       if (x === null || y === null) continue;
 
-      // radius proportional to log of usdValue
-      const radius = Math.max(6, Math.min(40, Math.log10(b.usdValue) * 4));
-
+      const radius = bubbleRadius(b.usdValue);
       const isSelected = b.id === selectedId;
       const age = now - b.birthMs;
       const isPulsing = age < PULSE_DURATION_MS && !isSelected;
 
       // pulse ring
       if (isPulsing) {
-        const pulseRadius = radius + (PULSE_DURATION_MS - age) / 100;
+        const progress = 1 - age / PULSE_DURATION_MS;
+        const pulseRadius = radius + progress * 20;
         ctx.beginPath();
         ctx.arc(x, y, pulseRadius, 0, Math.PI * 2);
-        ctx.strokeStyle = signalColor(b, 0.4);
+        ctx.strokeStyle = signalColor(b, progress * 0.5);
         ctx.lineWidth = 2;
         ctx.stroke();
       }
@@ -98,20 +230,39 @@ const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
         ctx.stroke();
       }
 
+      // Large-trade glow ring (> $1M) — extra visibility
+      if (b.usdValue >= 1_000_000) {
+        ctx.beginPath();
+        ctx.arc(x, y, radius + 2, 0, Math.PI * 2);
+        ctx.strokeStyle = signalColor(b, 0.5);
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+
       // fill
       ctx.beginPath();
       ctx.arc(x, y, radius, 0, Math.PI * 2);
       ctx.fillStyle = signalColor(b, isSelected ? SELECTED_ALPHA : BUBBLE_ALPHA);
       ctx.fill();
 
-      // label: B/S
+      // B/S label + optional qty
       ctx.fillStyle = 'rgba(255,255,255,0.95)';
-      ctx.font = `bold ${Math.max(8, radius * 0.6)}px sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(b.isMaker ? 'S' : 'B', x, y);
+
+      if (showContractQty && radius >= 14) {
+        // Two-line label: B/S on top, qty below
+        const fontSize = Math.max(8, radius * 0.5);
+        ctx.font = `bold ${fontSize}px sans-serif`;
+        ctx.fillText(b.isMaker ? 'S' : 'B', x, y - fontSize * 0.4);
+        ctx.font = `${Math.max(7, fontSize * 0.8)}px sans-serif`;
+        ctx.fillText(fmtQty(b.qty), x, y + fontSize * 0.7);
+      } else {
+        ctx.font = `bold ${Math.max(8, radius * 0.6)}px sans-serif`;
+        ctx.fillText(b.isMaker ? 'S' : 'B', x, y);
+      }
     }
-  }, [bubbles, selectedId]);
+  }, [bubbles, selectedId, showVolumeProfile, showContractQty, drawVolumeProfile]);
 
   // Always-fresh refs — avoid stale closures in chart subscriptions
   const drawBubblesRef = useRef(drawBubbles);
@@ -147,7 +298,7 @@ const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
     } else {
       drawBubbles();
     }
-  }, [bubbles, selectedId, drawBubbles]);
+  }, [bubbles, selectedId, drawBubbles, showVolumeProfile, showContractQty]);
 
   // Chart init
   useEffect(() => {
@@ -226,7 +377,7 @@ const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
         const bx = chart.timeScale().timeToCoordinate(b.time as UTCTimestamp);
         const by = series.priceToCoordinate(b.price);
         if (bx === null || by === null) continue;
-        const radius = Math.max(6, Math.min(40, Math.log10(b.usdValue) * 4));
+        const radius = bubbleRadius(b.usdValue); // consistent with render
         const dist = Math.hypot(x - bx, y - by);
         if (dist <= radius + 4 && dist < closestDist) {
           closest = b;
@@ -250,16 +401,28 @@ const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
     () => ({
       addCandle(c: Candle) {
         candleSeriesRef.current?.update(c as CandlestickData);
+        // Upsert into profile candles
+        const arr = candlesForProfileRef.current;
+        const idx = arr.findIndex((x) => (x.time as number) === (c.time as number));
+        if (idx >= 0) arr[idx] = c;
+        else arr.push(c);
       },
       updateCandle(c: Candle) {
         candleSeriesRef.current?.update(c as CandlestickData);
+        // Update in-progress candle in profile array
+        const arr = candlesForProfileRef.current;
+        const idx = arr.findIndex((x) => (x.time as number) === (c.time as number));
+        if (idx >= 0) arr[idx] = c;
+        else arr.push(c);
       },
       setCandles(cs: Candle[]) {
         candleSeriesRef.current?.setData(cs as CandlestickData[]);
+        candlesForProfileRef.current = [...cs];
       },
       clearChart() {
         candleSeriesRef.current?.setData([]);
         vwapSeriesRef.current?.setData([]);
+        candlesForProfileRef.current = [];
       },
       scrollToTime(time: number) {
         const chart = chartRef.current;
