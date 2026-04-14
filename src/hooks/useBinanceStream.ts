@@ -5,8 +5,14 @@ import type { Detector } from '../lib/detector';
 import { classifyTrade } from '../lib/detector';
 import { useStore } from '../lib/config';
 import { INTERVAL_SECS } from '../lib/constants';
-import { getCachedCandles, setCachedCandles } from '../lib/cache';
 import { getAutoCachedTrades, appendAutoCachedTrade } from '../lib/autoCache';
+import {
+  loadPriceHistory,
+  savePriceHistory,
+  mergeCandleIntoHistory,
+  saveDetectorWindow,
+  loadDetectorWindow,
+} from '../lib/priceDB';
 
 const BINANCE_REST = 'https://api.binance.com/api/v3';
 const CANDLE_LIMIT = 500;
@@ -46,6 +52,8 @@ export function useBinanceStream(
   const autoLoadTrades = useStore((s) => s.autoLoadTrades);
   const addBubble = useStore((s) => s.addBubble);
   const addToTradesLog = useStore((s) => s.addToTradesLog);
+  const setBubbles = useStore((s) => s.setBubbles);
+  const setTradesLog = useStore((s) => s.setTradesLog);
   const clearBubbles = useStore((s) => s.clearBubbles);
   const clearTradesLog = useStore((s) => s.clearTradesLog);
   const setExchangeStatus = useStore((s) => s.setExchangeStatus);
@@ -63,39 +71,51 @@ export function useBinanceStream(
     let cancelled = false;
 
     async function init() {
-      chartRef.current?.clearChart(); // wipe old candles + VWAP before loading new symbol
+      chartRef.current?.clearChart();
       setExchangeStatus('binance', 'connecting');
 
-      // Load history
+      // Restore detector window before stream opens so first trades have context
+      const savedWindow = await loadDetectorWindow(symbol, interval);
+      if (savedWindow.length > 0) detectorRef.current?.warmup(savedWindow);
+
       await loadHistory();
       if (cancelled) return;
 
-      // Load auto-cached trades
-      if (autoLoadTrades) {
-        await loadAutoCached();
-      }
+      if (autoLoadTrades) await loadAutoCached();
       if (cancelled) return;
 
-      // Open live stream
       openStream();
     }
 
     async function loadHistory() {
-      // Try IndexedDB cache first
-      const cached = await getCachedCandles(symbol, interval);
-      if (cached && cached.length > 0) {
-        for (const c of cached) candlesRef.current.set(c.time as number, c);
-        chartRef.current?.setCandles(cached);
-        currentCandleRef.current = cached[cached.length - 1] ?? null;
+      // 1. Paint from priceDB immediately (fast first paint — no session cache)
+      const stored = await loadPriceHistory(symbol, interval);
+
+      if (stored.length > 0) {
+        for (const c of stored) candlesRef.current.set(c.time as number, c);
+        chartRef.current?.setCandles(stored);
+        currentCandleRef.current = stored[stored.length - 1] ?? null;
       }
 
-      // Fetch fresh from REST
+      // 2. Fetch from Binance REST — delta if gap small, else latest CANDLE_LIMIT
       try {
-        const url = `${BINANCE_REST}/klines?symbol=${symbol}&interval=${interval}&limit=${CANDLE_LIMIT}`;
+        const keys = Array.from(candlesRef.current.keys());
+        const lastTime = keys.length > 0 ? keys.reduce((a, b) => Math.max(a, b), 0) : null;
+        const intervalSecs = INTERVAL_SECS[interval] ?? 60;
+        let url = `${BINANCE_REST}/klines?symbol=${symbol}&interval=${interval}&limit=${CANDLE_LIMIT}`;
+        if (lastTime) {
+          const gapCandles = Math.floor((Date.now() / 1000 - lastTime) / intervalSecs);
+          if (gapCandles < CANDLE_LIMIT) {
+            url += `&startTime=${(lastTime + intervalSecs) * 1000}`;
+          }
+        }
+
         const resp = await fetch(url);
         if (!resp.ok) return;
         const raw: unknown[][] = await resp.json();
-        const candles: Candle[] = raw.map((k) => ({
+        if (cancelled) return;
+
+        const fresh: Candle[] = raw.map((k) => ({
           time: (Math.floor((k[0] as number) / 1000)) as UTCTimestamp,
           open: parseFloat(k[1] as string),
           high: parseFloat(k[2] as string),
@@ -104,11 +124,15 @@ export function useBinanceStream(
           volume: parseFloat(k[5] as string),
         }));
 
-        for (const c of candles) candlesRef.current.set(c.time as number, c);
-        chartRef.current?.setCandles(candles);
-        currentCandleRef.current = candles[candles.length - 1] ?? null;
-
-        await setCachedCandles(symbol, interval, candles);
+        if (fresh.length > 0) {
+          for (const c of fresh) candlesRef.current.set(c.time as number, c);
+          const all = Array.from(candlesRef.current.values()).sort(
+            (a, b) => (a.time as number) - (b.time as number),
+          );
+          chartRef.current?.setCandles(all);
+          currentCandleRef.current = all[all.length - 1] ?? null;
+          await savePriceHistory(symbol, interval, all);
+        }
       } catch (e) {
         console.error('loadHistory error', e);
       }
@@ -117,22 +141,24 @@ export function useBinanceStream(
     async function loadAutoCached() {
       try {
         const trades = await getAutoCachedTrades(symbol, interval);
-        for (const trade of trades) {
-          const bubble: Bubble = {
-            id: trade.id,
-            time: trade.time,
-            price: trade.price,
-            qty: trade.qty,
-            usdValue: trade.usdValue,
-            isMaker: trade.isMaker,
-            pattern: trade.pattern,
-            patternSignal: trade.patternSignal,
-            exchange: trade.exchange,
-            birthMs: Date.now(),
-          };
-          addBubble(bubble);
-          addToTradesLog(trade);
-        }
+        if (trades.length === 0) return;
+
+        // Build full arrays then do ONE store update each — avoids O(n²) re-renders
+        const restoredBubbles: Bubble[] = trades.map((trade) => ({
+          id: trade.id,
+          time: trade.time,
+          price: trade.price,
+          qty: trade.qty,
+          usdValue: trade.usdValue,
+          isMaker: trade.isMaker,
+          pattern: trade.pattern,
+          patternSignal: trade.patternSignal,
+          exchange: trade.exchange,
+          birthMs: 0, // no pulse — draw immediately static
+        }));
+
+        setBubbles(restoredBubbles);  // single update, merges with any live bubbles already added
+        setTradesLog(trades);         // single update
       } catch (e) {
         console.error('loadAutoCached error', e);
       }
@@ -141,8 +167,6 @@ export function useBinanceStream(
     function openStream() {
       const sym = symbol.toLowerCase();
 
-      // Two separate single-stream WS connections — avoids combined-stream
-      // envelope { stream, data } that breaks msg.e checks.
       const klineWs = new WebSocket(
         `wss://stream.binance.com:9443/ws/${sym}@kline_${interval}`,
       );
@@ -190,6 +214,10 @@ export function useBinanceStream(
 
       if (k.x) {
         chartRef.current?.addCandle(candle);
+        mergeCandleIntoHistory(symbol, interval, candle).catch(console.error);
+        // Checkpoint detector window on every closed candle
+        const w = detectorRef.current?.getWindow();
+        if (w && w.length > 0) saveDetectorWindow(symbol, interval, w).catch(console.error);
       } else {
         chartRef.current?.updateCandle(candle);
       }
@@ -260,6 +288,9 @@ export function useBinanceStream(
       wsRef.current.forEach((ws) => ws.close());
       wsRef.current = [];
       setExchangeStatus('binance', 'disconnected');
+      // Best-effort save of detector window on unmount/symbol change
+      const w = detectorRef.current?.getWindow();
+      if (w && w.length > 0) saveDetectorWindow(symbol, interval, w).catch(console.error);
     };
   }, [symbol, interval]); // eslint-disable-line react-hooks/exhaustive-deps
 }

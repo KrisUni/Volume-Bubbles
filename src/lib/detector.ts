@@ -48,6 +48,14 @@ export class Detector {
     return { trade, usdValue, zscore };
   }
 
+  getWindow(): number[] {
+    return [...this.window];
+  }
+
+  warmup(values: number[]): void {
+    this.window = values.slice(-WINDOW_SIZE);
+  }
+
   reset(): void {
     this.window = [];
   }

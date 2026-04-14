@@ -19,7 +19,7 @@ export const INTERVAL_MS: Record<string, number> = Object.fromEntries(
   Object.entries(INTERVAL_SECS).map(([k, v]) => [k, v * 1000]),
 );
 
-export const MAX_BUBBLES = 200;
+export const MAX_BUBBLES = 500;
 export const MAX_TRADES_LOG = 500;
 export const MAX_AUTO_CACHE = 500;
 

@@ -47,6 +47,7 @@ const RUNTIME_DEFAULTS: RuntimeState = {
 interface AppActions {
   // bubbles
   addBubble: (b: Bubble) => void;
+  setBubbles: (bs: Bubble[]) => void;
   clearBubbles: () => void;
   selectBubble: (id: string | null) => void;
   // trades log
@@ -81,6 +82,16 @@ export const useStore = create<AppState>()(
         set((s) => {
           if (s.bubbles.some((existing) => existing.id === b.id)) return s;
           const next = [...s.bubbles, b];
+          if (next.length > MAX_BUBBLES) next.splice(0, next.length - MAX_BUBBLES);
+          return { bubbles: next };
+        }),
+
+      // Batch restore: merge historical bubbles with any live ones already added
+      setBubbles: (bs) =>
+        set((s) => {
+          const historicalIds = new Set(bs.map((b) => b.id));
+          const liveOnly = s.bubbles.filter((b) => !historicalIds.has(b.id));
+          const next = [...bs, ...liveOnly];
           if (next.length > MAX_BUBBLES) next.splice(0, next.length - MAX_BUBBLES);
           return { bubbles: next };
         }),
