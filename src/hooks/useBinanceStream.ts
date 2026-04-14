@@ -140,13 +140,16 @@ export function useBinanceStream(
 
     async function loadAutoCached() {
       try {
-        const trades = await getAutoCachedTrades(symbol, interval);
+        const trades = await getAutoCachedTrades(symbol);
         if (trades.length === 0) return;
 
-        // Build full arrays then do ONE store update each — avoids O(n²) re-renders
+        const intervalSecs = INTERVAL_SECS[interval] ?? 60;
+
+        // Remap trade.time (raw seconds) to the current interval's candle bucket
+        // so bubbles align correctly regardless of which timeframe is active
         const restoredBubbles: Bubble[] = trades.map((trade) => ({
           id: trade.id,
-          time: trade.time,
+          time: Math.floor(trade.time / intervalSecs) * intervalSecs,
           price: trade.price,
           qty: trade.qty,
           usdValue: trade.usdValue,
@@ -157,8 +160,8 @@ export function useBinanceStream(
           birthMs: 0, // no pulse — draw immediately static
         }));
 
-        setBubbles(restoredBubbles);  // single update, merges with any live bubbles already added
-        setTradesLog(trades);         // single update
+        setBubbles(restoredBubbles);
+        setTradesLog(trades);
       } catch (e) {
         console.error('loadAutoCached error', e);
       }
@@ -278,7 +281,7 @@ export function useBinanceStream(
 
       addBubble(bubble);
       addToTradesLog(logEntry);
-      appendAutoCachedTrade(symbol, interval, logEntry).catch(console.error);
+      appendAutoCachedTrade(symbol, logEntry).catch(console.error);
     }
 
     init();

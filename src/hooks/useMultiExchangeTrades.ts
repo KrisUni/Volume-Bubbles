@@ -80,7 +80,7 @@ export function useMultiExchangeTrades(
 
       addBubble(bubble);
       addToTradesLog(logEntry);
-      appendAutoCachedTrade(symbol, interval, logEntry).catch(console.error);
+      appendAutoCachedTrade(symbol, logEntry).catch(console.error);
     }
 
     function onStatus(exchange: string) {

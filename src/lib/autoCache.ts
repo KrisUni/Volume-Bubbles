@@ -4,14 +4,15 @@ import { openDB, idbReq } from './db';
 
 const STORE = 'auto-trades';
 
-export async function getAutoCachedTrades(
-  symbol: string,
-  interval: string,
-): Promise<BigTrade[]> {
+// Trades are stored per-symbol (not per-interval) so bubbles are visible
+// across all timeframes. The `time` field stores raw trade timestamp (seconds)
+// so it can be remapped to any candle interval on load.
+
+export async function getAutoCachedTrades(symbol: string): Promise<BigTrade[]> {
   try {
     const db = await openDB();
     const tx = db.transaction(STORE, 'readonly');
-    const result = await idbReq<BigTrade[] | undefined>(tx.objectStore(STORE).get(`${symbol}:${interval}`));
+    const result = await idbReq<BigTrade[] | undefined>(tx.objectStore(STORE).get(symbol));
     return result ?? [];
   } catch (e) {
     console.error('getAutoCachedTrades error', e);
@@ -21,30 +22,28 @@ export async function getAutoCachedTrades(
 
 export async function appendAutoCachedTrade(
   symbol: string,
-  interval: string,
   trade: BigTrade,
 ): Promise<void> {
   try {
     const db = await openDB();
-    const key = `${symbol}:${interval}`;
     const tx = db.transaction(STORE, 'readwrite');
     const store = tx.objectStore(STORE);
-    const existing = await idbReq<BigTrade[] | undefined>(store.get(key));
+    const existing = await idbReq<BigTrade[] | undefined>(store.get(symbol));
     const trades = existing ?? [];
     if (trades.some((t) => t.id === trade.id)) return;
     trades.push(trade);
     if (trades.length > MAX_AUTO_CACHE) trades.splice(0, trades.length - MAX_AUTO_CACHE);
-    await idbReq(store.put(trades, key));
+    await idbReq(store.put(trades, symbol));
   } catch (e) {
     console.error('appendAutoCachedTrade error', e);
   }
 }
 
-export async function clearAutoCache(symbol: string, interval: string): Promise<void> {
+export async function clearAutoCache(symbol: string): Promise<void> {
   try {
     const db = await openDB();
     const tx = db.transaction(STORE, 'readwrite');
-    await idbReq(tx.objectStore(STORE).delete(`${symbol}:${interval}`));
+    await idbReq(tx.objectStore(STORE).delete(symbol));
   } catch (e) {
     console.error('clearAutoCache error', e);
   }
