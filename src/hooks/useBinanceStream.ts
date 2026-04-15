@@ -146,30 +146,40 @@ export function useBinanceStream(
         const trades = await getAutoCachedTrades(symbol);
         if (trades.length === 0) return;
 
-        // Apply active filters at load time — same logic as rederive effect
-        const { minUsdFilter, minQtyFilter } = useStore.getState();
+        // Apply active USD display filter
+        const { minUsdFilter, showPatterns } = useStore.getState();
         const filtered = trades.filter((t) => {
           if (minUsdFilter > 0 && t.usdValue < minUsdFilter) return false;
-          if (minQtyFilter > 0 && t.qty < minQtyFilter) return false;
           return true;
         });
 
         const intervalSecs = INTERVAL_SECS[interval] ?? 60;
 
-        // Remap trade.time (raw seconds) to the current interval's candle bucket
-        // so bubbles align correctly regardless of which timeframe is active
-        const restoredBubbles: Bubble[] = filtered.map((trade) => ({
-          id: trade.id,
-          time: Math.floor(trade.time / intervalSecs) * intervalSecs,
-          price: trade.price,
-          qty: trade.qty,
-          usdValue: trade.usdValue,
-          isMaker: trade.isMaker,
-          pattern: trade.pattern,
-          patternSignal: trade.patternSignal,
-          exchange: trade.exchange,
-          birthMs: 0, // no pulse — draw immediately static
-        }));
+        // Reclassify patterns against current-interval candles.
+        // Stored pattern was classified on the original timeframe — it's stale on any other TF.
+        // (e.g. bullish on 1m ≠ bullish on 3m — candle OHLC is different)
+        const restoredBubbles: Bubble[] = filtered.map((trade) => {
+          const candleTime = Math.floor(trade.time / intervalSecs) * intervalSecs;
+          const candle = candlesRef.current.get(candleTime);
+          const classification = (candle && showPatterns)
+            ? classifyTrade(
+                { trade: { price: trade.price, qty: trade.qty, isMaker: trade.isMaker, timestamp: trade.time * 1000 }, usdValue: trade.usdValue, zscore: 0 },
+                candle,
+              )
+            : { pattern: undefined, patternSignal: undefined };
+          return {
+            id: trade.id,
+            time: candleTime,
+            price: trade.price,
+            qty: trade.qty,
+            usdValue: trade.usdValue,
+            isMaker: trade.isMaker,
+            pattern: classification.pattern,
+            patternSignal: classification.patternSignal,
+            exchange: trade.exchange,
+            birthMs: 0, // no pulse — draw immediately static
+          };
+        });
 
         setBubbles(restoredBubbles);
         setTradesLog(filtered);
@@ -252,23 +262,39 @@ export function useBinanceStream(
       const result = detector.processTrade(rawTrade);
       if (!result) return;
 
-      const { minUsdFilter, minQtyFilter } = useStore.getState();
-      if (minUsdFilter > 0 && result.usdValue < minUsdFilter) return;
-      if (minQtyFilter > 0 && rawTrade.qty < minQtyFilter) return;
-
-      const candle = currentCandleRef.current;
-      if (!candle) return;
-
       const intervalSecs = INTERVAL_SECS[interval] ?? 60;
       const candleTime = Math.floor(rawTrade.timestamp / 1000 / intervalSecs) * intervalSecs;
+      const tradeTime = Math.floor(rawTrade.timestamp / 1000);
+      const id = `binance-${t.a}-${t.T}`;
 
       // Classify against CLOSED candle (final OHLC); fall back to live candle if no close yet
       // Read showPatterns from store directly — avoids stale closure (effect runs on [symbol, interval] only)
-      const classifyCandle = closedCandleRef.current ?? candle;
-      const classification = useStore.getState().showPatterns ? classifyTrade(result, classifyCandle) : {};
+      const classifyCandle = closedCandleRef.current ?? currentCandleRef.current;
+      const classification = (classifyCandle && useStore.getState().showPatterns)
+        ? classifyTrade(result, classifyCandle)
+        : {};
 
-      const id = `binance-${t.a}-${t.T}`;
-      const tradeTime = Math.floor(rawTrade.timestamp / 1000);
+      const logEntry = {
+        id,
+        time: tradeTime,
+        price: rawTrade.price,
+        qty: rawTrade.qty,
+        usdValue: result.usdValue,
+        isMaker: rawTrade.isMaker,
+        pattern: classification.pattern,
+        patternSignal: classification.patternSignal,
+        exchange: 'binance',
+      };
+
+      // Save ALL detector-filtered trades to DB before applying display filters.
+      // DB = full history; bubbles/log = filtered display view only.
+      // This ensures loosening the filter later restores trades that were previously hidden.
+      appendAutoCachedTrade(symbol, logEntry).catch(console.error);
+
+      // Display filter — only gates what's shown, not what's stored
+      const { minUsdFilter } = useStore.getState();
+      if (minUsdFilter > 0 && result.usdValue < minUsdFilter) return;
+      if (!currentCandleRef.current) return;
 
       const bubble: Bubble = {
         id,
@@ -283,21 +309,8 @@ export function useBinanceStream(
         birthMs: Date.now(),
       };
 
-      const logEntry = {
-        id,
-        time: tradeTime,
-        price: rawTrade.price,
-        qty: rawTrade.qty,
-        usdValue: result.usdValue,
-        isMaker: rawTrade.isMaker,
-        pattern: classification.pattern,
-        patternSignal: classification.patternSignal,
-        exchange: 'binance',
-      };
-
       addBubble(bubble);
       addToTradesLog(logEntry);
-      appendAutoCachedTrade(symbol, logEntry).catch(console.error);
     }
 
     init();
@@ -313,35 +326,44 @@ export function useBinanceStream(
     };
   }, [symbol, interval]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Re-derive bubbles from DB whenever minUsdFilter or minQtyFilter changes.
-  // DB is source of truth; bubbles = filtered view of stored trades.
+  // Re-derive bubbles from DB whenever minUsdFilter changes.
+  // DB stores all detector-filtered trades; bubbles = USD-filtered display view.
   const minUsdFilter = useStore((s) => s.minUsdFilter);
-  const minQtyFilter = useStore((s) => s.minQtyFilter);
   useEffect(() => {
     if (!autoLoadTrades) return;
     async function rederive() {
       const trades = await getAutoCachedTrades(symbol);
       const intervalSecs = INTERVAL_SECS[interval] ?? 60;
+      const showPatterns = useStore.getState().showPatterns;
       const filtered = trades.filter((t) => {
         if (minUsdFilter > 0 && t.usdValue < minUsdFilter) return false;
-        if (minQtyFilter > 0 && t.qty < minQtyFilter) return false;
         return true;
       });
-      const rederived: Bubble[] = filtered.map((trade) => ({
-        id: trade.id,
-        time: Math.floor(trade.time / intervalSecs) * intervalSecs,
-        price: trade.price,
-        qty: trade.qty,
-        usdValue: trade.usdValue,
-        isMaker: trade.isMaker,
-        pattern: trade.pattern,
-        patternSignal: trade.patternSignal,
-        exchange: trade.exchange,
-        birthMs: 0,
-      }));
+      const rederived: Bubble[] = filtered.map((trade) => {
+        const candleTime = Math.floor(trade.time / intervalSecs) * intervalSecs;
+        const candle = candlesRef.current.get(candleTime);
+        const classification = (candle && showPatterns)
+          ? classifyTrade(
+              { trade: { price: trade.price, qty: trade.qty, isMaker: trade.isMaker, timestamp: trade.time * 1000 }, usdValue: trade.usdValue, zscore: 0 },
+              candle,
+            )
+          : { pattern: undefined, patternSignal: undefined };
+        return {
+          id: trade.id,
+          time: candleTime,
+          price: trade.price,
+          qty: trade.qty,
+          usdValue: trade.usdValue,
+          isMaker: trade.isMaker,
+          pattern: classification.pattern,
+          patternSignal: classification.patternSignal,
+          exchange: trade.exchange,
+          birthMs: 0,
+        };
+      });
       replaceBubbles(rederived); // direct replace — no merge, so filtered-out bubbles don't leak back
       setTradesLog(filtered);
     }
     rederive().catch(console.error);
-  }, [minUsdFilter, minQtyFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [minUsdFilter]); // eslint-disable-line react-hooks/exhaustive-deps
 }
