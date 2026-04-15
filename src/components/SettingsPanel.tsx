@@ -8,11 +8,15 @@ export default function SettingsPanel() {
   const minUsdFilter = useStore((s) => s.minUsdFilter);
   const showContractQty = useStore((s) => s.showContractQty);
   const showVolumeProfile = useStore((s) => s.showVolumeProfile);
+  const showDelta = useStore((s) => s.showDelta);
+  const showDeltaBubbles = useStore((s) => s.showDeltaBubbles);
   const setShowPatterns = useStore((s) => s.setShowPatterns);
   const setAutoLoadTrades = useStore((s) => s.setAutoLoadTrades);
   const setDetectionThreshold = useStore((s) => s.setDetectionThreshold);
   const setMinUsdFilter = useStore((s) => s.setMinUsdFilter);
   const setShowContractQty = useStore((s) => s.setShowContractQty);
+  const setShowDelta = useStore((s) => s.setShowDelta);
+  const setShowDeltaBubbles = useStore((s) => s.setShowDeltaBubbles);
   const setShowVolumeProfile = useStore((s) => s.setShowVolumeProfile);
   const closePanel = useStore((s) => s.closePanel);
 
@@ -121,6 +125,26 @@ export default function SettingsPanel() {
             onChange={(e) => setShowVolumeProfile(e.target.checked)}
           />
           <span>Show volume profile</span>
+        </label>
+
+        {/* ── Delta volume histogram ── */}
+        <label className="setting-row">
+          <input
+            type="checkbox"
+            checked={showDelta}
+            onChange={(e) => setShowDelta(e.target.checked)}
+          />
+          <span>Show delta histogram</span>
+        </label>
+
+        {/* ── Delta bubble mode ── */}
+        <label className="setting-row">
+          <input
+            type="checkbox"
+            checked={showDeltaBubbles}
+            onChange={(e) => setShowDeltaBubbles(e.target.checked)}
+          />
+          <span>Delta bubbles mode (hides trade bubbles)</span>
         </label>
 
         {/* ── Auto-load ── */}

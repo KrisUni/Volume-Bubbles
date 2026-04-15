@@ -14,6 +14,8 @@ export interface AppConfig {
   minQtyFilter: number;       // hard min contract qty per trade, 0 = disabled
   showContractQty: boolean;   // render qty label on bubble
   showVolumeProfile: boolean; // render volume profile overlay on chart
+  showDelta: boolean;         // render delta volume histogram below candles
+  showDeltaBubbles: boolean;  // replace trade bubbles with per-candle delta bubbles
 }
 
 const CONFIG_DEFAULTS: AppConfig = {
@@ -26,6 +28,8 @@ const CONFIG_DEFAULTS: AppConfig = {
   minQtyFilter: 0,
   showContractQty: false,
   showVolumeProfile: true,
+  showDelta: true,
+  showDeltaBubbles: false,
 };
 
 // ── Runtime state (not persisted) ────────────────────────────────
@@ -75,6 +79,8 @@ interface AppActions {
   setMinQtyFilter: (v: number) => void;
   setShowContractQty: (v: boolean) => void;
   setShowVolumeProfile: (v: boolean) => void;
+  setShowDelta: (v: boolean) => void;
+  setShowDeltaBubbles: (v: boolean) => void;
   // exchange status
   setExchangeStatus: (exchange: string, status: ConnectionStatus) => void;
 }
@@ -164,6 +170,8 @@ export const useStore = create<AppState>()(
       setMinQtyFilter: (minQtyFilter) => set({ minQtyFilter }),
       setShowContractQty: (showContractQty) => set({ showContractQty }),
       setShowVolumeProfile: (showVolumeProfile) => set({ showVolumeProfile }),
+      setShowDelta: (showDelta) => set({ showDelta }),
+      setShowDeltaBubbles: (showDeltaBubbles) => set({ showDeltaBubbles }),
 
       // ── Exchange status ──
       setExchangeStatus: (exchange, status) =>
@@ -183,6 +191,8 @@ export const useStore = create<AppState>()(
         autoLoadTrades: s.autoLoadTrades,
         showContractQty: s.showContractQty,
         showVolumeProfile: s.showVolumeProfile,
+        showDelta: s.showDelta,
+        showDeltaBubbles: s.showDeltaBubbles,
       }),
     },
   ),

@@ -7,6 +7,7 @@ export interface Candle {
   low: number;
   close: number;
   volume?: number;
+  takerBuyVolume?: number; // taker buy base asset volume — enables delta = takerBuy - takerSell
 }
 
 export type PatternName =

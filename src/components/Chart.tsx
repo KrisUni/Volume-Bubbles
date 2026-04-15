@@ -10,6 +10,7 @@ import type {
   CandlestickData,
   UTCTimestamp,
   LineData,
+  HistogramData,
 } from 'lightweight-charts';
 import type { Candle, Bubble } from '../lib/types';
 import { useStore } from '../lib/config';
@@ -41,13 +42,15 @@ function fmtQty(qty: number): string {
   return qty.toFixed(2);
 }
 
-// Heatmap color: 0=cold blue → 0.5=green → 0.75=orange → 1=hot red
+// Traditional heatmap: deep blue → blue → cyan → green → yellow → red
 function heatColor(t: number, alpha: number): string {
   const stops: [number, [number, number, number]][] = [
-    [0.00, [20,  60,  160]],
-    [0.30, [20,  160, 120]],
-    [0.60, [200, 140,  20]],
-    [1.00, [220,  40,  20]],
+    [0.00, [ 10,  20, 100]],  // deep blue  (lowest volume)
+    [0.20, [ 20, 100, 220]],  // blue
+    [0.40, [ 20, 190, 210]],  // cyan
+    [0.60, [ 20, 200,  70]],  // green
+    [0.80, [230, 200,  20]],  // yellow
+    [1.00, [230,  40,  20]],  // red        (highest volume)
   ];
   let lo = stops[0], hi = stops[stops.length - 1];
   for (let i = 0; i < stops.length - 1; i++) {
@@ -58,6 +61,19 @@ function heatColor(t: number, alpha: number): string {
   const g = Math.round(lo[1][1] + f * (hi[1][1] - lo[1][1]));
   const b = Math.round(lo[1][2] + f * (hi[1][2] - lo[1][2]));
   return `rgba(${r},${g},${b},${alpha.toFixed(2)})`;
+}
+
+// Delta bar: abs(buyVol - sellVol), green if net buy, red if net sell
+function candleDeltaBar(c: Candle): HistogramData | null {
+  if (c.takerBuyVolume === undefined || c.volume === undefined) return null;
+  const buyVol = c.takerBuyVolume;
+  const sellVol = c.volume - buyVol;
+  const delta = buyVol - sellVol;
+  return {
+    time: c.time,
+    value: Math.abs(delta),
+    color: delta >= 0 ? 'rgba(34,197,94,0.70)' : 'rgba(239,68,68,0.70)',
+  };
 }
 
 function signalColor(b: Bubble, alpha: number): string {
@@ -75,6 +91,7 @@ const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const vwapSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const deltaSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animFrameRef = useRef<number | null>(null);
   const candlesForProfileRef = useRef<Candle[]>([]);
@@ -83,6 +100,8 @@ const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
   const selectedId = useStore((s) => s.selectedBubbleId);
   const showVolumeProfile = useStore((s) => s.showVolumeProfile);
   const showContractQty = useStore((s) => s.showContractQty);
+  const showDelta = useStore((s) => s.showDelta);
+  const showDeltaBubbles = useStore((s) => s.showDeltaBubbles);
 
   // Draw volume profile from candle data as a left-edge overlay
   const drawVolumeProfile = useCallback((
@@ -154,12 +173,14 @@ const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
 
       const isPOC = i === pocIndex;
       const intensity = bins[i] / maxBin; // 0–1
-      const baseAlpha = isPOC ? 0.75 : 0.20 + intensity * 0.35;
-      const fillColor = isPOC ? 'rgba(255,210,40,0.80)' : heatColor(intensity, baseAlpha);
+      // Higher base opacity for better visibility; POC at full intensity
+      const baseAlpha = 0.30 + intensity * 0.55;
+      const fillColor = heatColor(intensity, baseAlpha);
 
       // Horizontal gradient: solid at left edge, fades to transparent at bar tip
       const grad = ctx.createLinearGradient(0, 0, barW, 0);
       grad.addColorStop(0, fillColor);
+      grad.addColorStop(0.7, fillColor);
       grad.addColorStop(1, fillColor.replace(/[\d.]+\)$/, '0)'));
       ctx.fillStyle = grad;
       ctx.fillRect(0, yDraw, barW, barH);
@@ -167,9 +188,10 @@ const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
       if (isPOC) {
         const pocY = (yTop + yBot) / 2;
         ctx.save();
-        ctx.strokeStyle = 'rgba(255,210,50,0.65)';
+        // Bright white dashed line for POC — max contrast against any heat color
+        ctx.strokeStyle = 'rgba(255,255,255,0.80)';
         ctx.lineWidth = 1;
-        ctx.setLineDash([4, 6]);
+        ctx.setLineDash([3, 5]);
         ctx.beginPath();
         ctx.moveTo(0, pocY);
         ctx.lineTo(canvasEl.width, pocY);
@@ -192,77 +214,135 @@ const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // Volume profile behind bubbles
+    // Volume profile always behind everything
     if (showVolumeProfile) {
       drawVolumeProfile(ctx, chart, candleSeries, canvas);
     }
 
-    const now = Date.now();
     const ts = chart.timeScale();
 
-    for (const b of bubbles) {
-      const x = ts.timeToCoordinate(b.time as UTCTimestamp);
-      const y = candleSeries.priceToCoordinate(b.price);
-      if (x === null || y === null) continue;
+    if (showDeltaBubbles) {
+      // ── Delta bubble mode: one bubble per candle, sized by |buyVol - sellVol| ──
+      const visibleRange = chart.timeScale().getVisibleRange();
+      if (visibleRange) {
+        const fromT = visibleRange.from as number;
+        const toT = visibleRange.to as number;
 
-      const radius = bubbleRadius(b.usdValue);
-      const isSelected = b.id === selectedId;
-      const age = now - b.birthMs;
-      const isPulsing = age < PULSE_DURATION_MS && !isSelected;
+        for (const c of candlesForProfileRef.current) {
+          const t = c.time as number;
+          if (t < fromT || t > toT) continue;
+          if (c.takerBuyVolume === undefined || c.volume === undefined) continue;
 
-      // pulse ring
-      if (isPulsing) {
-        const progress = 1 - age / PULSE_DURATION_MS;
-        const pulseRadius = radius + progress * 20;
-        ctx.beginPath();
-        ctx.arc(x, y, pulseRadius, 0, Math.PI * 2);
-        ctx.strokeStyle = signalColor(b, progress * 0.5);
-        ctx.lineWidth = 2;
-        ctx.stroke();
+          const buyVol = c.takerBuyVolume;
+          const sellVol = c.volume - buyVol;
+          const delta = buyVol - sellVol; // base asset units
+          const deltaUsd = Math.abs(delta) * c.close;
+          if (deltaUsd < 5_000) continue; // skip noise
+
+          const x = ts.timeToCoordinate(c.time as UTCTimestamp);
+          // Positive delta → bubble at candle high (buyers pushed up); negative → at low
+          const yPrice = delta >= 0 ? c.high : c.low;
+          const y = candleSeries.priceToCoordinate(yPrice);
+          if (x === null || y === null) continue;
+
+          const radius = bubbleRadius(deltaUsd);
+          const isBuy = delta >= 0;
+          const color = isBuy ? `rgba(34,197,94,0.82)` : `rgba(239,68,68,0.82)`;
+
+          // fill
+          ctx.beginPath();
+          ctx.arc(x, y, radius, 0, Math.PI * 2);
+          ctx.fillStyle = color;
+          ctx.fill();
+
+          // Δ label + formatted qty
+          ctx.fillStyle = 'rgba(255,255,255,0.95)';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          if (radius >= 14) {
+            const fontSize = Math.max(8, radius * 0.5);
+            ctx.font = `bold ${fontSize}px sans-serif`;
+            ctx.fillText('Δ', x, y - fontSize * 0.4);
+            ctx.font = `${Math.max(7, fontSize * 0.8)}px sans-serif`;
+            ctx.fillText(fmtQty(Math.abs(delta)), x, y + fontSize * 0.7);
+          } else {
+            ctx.font = `bold ${Math.max(8, radius * 0.6)}px sans-serif`;
+            ctx.fillText('Δ', x, y);
+          }
+        }
       }
+    } else {
+      // ── Regular trade bubble mode ──
+      const now = Date.now();
 
-      // selected ring
-      if (isSelected) {
+      for (const b of bubbles) {
+        const x = ts.timeToCoordinate(b.time as UTCTimestamp);
+        const y = candleSeries.priceToCoordinate(b.price);
+        if (x === null || y === null) continue;
+
+        const radius = bubbleRadius(b.usdValue);
+        const isSelected = b.id === selectedId;
+        const age = now - b.birthMs;
+        const isPulsing = age < PULSE_DURATION_MS && !isSelected;
+
+        // pulse ring
+        if (isPulsing) {
+          const progress = 1 - age / PULSE_DURATION_MS;
+          const pulseRadius = radius + progress * 20;
+          ctx.beginPath();
+          ctx.arc(x, y, pulseRadius, 0, Math.PI * 2);
+          ctx.strokeStyle = signalColor(b, progress * 0.5);
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+
+        // selected ring
+        if (isSelected) {
+          ctx.beginPath();
+          ctx.arc(x, y, radius + 4, 0, Math.PI * 2);
+          ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+
+        // Large-trade glow ring (> $1M)
+        if (b.usdValue >= 1_000_000) {
+          ctx.beginPath();
+          ctx.arc(x, y, radius + 2, 0, Math.PI * 2);
+          ctx.strokeStyle = signalColor(b, 0.5);
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        }
+
+        // fill
         ctx.beginPath();
-        ctx.arc(x, y, radius + 4, 0, Math.PI * 2);
-        ctx.strokeStyle = 'rgba(255,255,255,0.9)';
-        ctx.lineWidth = 2;
-        ctx.stroke();
-      }
+        ctx.arc(x, y, radius, 0, Math.PI * 2);
+        ctx.fillStyle = signalColor(b, isSelected ? SELECTED_ALPHA : BUBBLE_ALPHA);
+        ctx.fill();
 
-      // Large-trade glow ring (> $1M) — extra visibility
-      if (b.usdValue >= 1_000_000) {
-        ctx.beginPath();
-        ctx.arc(x, y, radius + 2, 0, Math.PI * 2);
-        ctx.strokeStyle = signalColor(b, 0.5);
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
-      }
+        // B/S label + optional qty
+        ctx.fillStyle = 'rgba(255,255,255,0.95)';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
 
-      // fill
-      ctx.beginPath();
-      ctx.arc(x, y, radius, 0, Math.PI * 2);
-      ctx.fillStyle = signalColor(b, isSelected ? SELECTED_ALPHA : BUBBLE_ALPHA);
-      ctx.fill();
-
-      // B/S label + optional qty
-      ctx.fillStyle = 'rgba(255,255,255,0.95)';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-
-      if (showContractQty && radius >= 14) {
-        // Two-line label: B/S on top, qty below
-        const fontSize = Math.max(8, radius * 0.5);
-        ctx.font = `bold ${fontSize}px sans-serif`;
-        ctx.fillText(b.isMaker ? 'S' : 'B', x, y - fontSize * 0.4);
-        ctx.font = `${Math.max(7, fontSize * 0.8)}px sans-serif`;
-        ctx.fillText(fmtQty(b.qty), x, y + fontSize * 0.7);
-      } else {
-        ctx.font = `bold ${Math.max(8, radius * 0.6)}px sans-serif`;
-        ctx.fillText(b.isMaker ? 'S' : 'B', x, y);
+        if (showContractQty && radius >= 14) {
+          const fontSize = Math.max(8, radius * 0.5);
+          ctx.font = `bold ${fontSize}px sans-serif`;
+          ctx.fillText(b.isMaker ? 'S' : 'B', x, y - fontSize * 0.4);
+          ctx.font = `${Math.max(7, fontSize * 0.8)}px sans-serif`;
+          ctx.fillText(fmtQty(b.qty), x, y + fontSize * 0.7);
+        } else {
+          ctx.font = `bold ${Math.max(8, radius * 0.6)}px sans-serif`;
+          ctx.fillText(b.isMaker ? 'S' : 'B', x, y);
+        }
       }
     }
-  }, [bubbles, selectedId, showVolumeProfile, showContractQty, drawVolumeProfile]);
+  }, [bubbles, selectedId, showVolumeProfile, showContractQty, showDeltaBubbles, drawVolumeProfile]);
+
+  // Show/hide delta series when toggle changes
+  useEffect(() => {
+    deltaSeriesRef.current?.applyOptions({ visible: showDelta });
+  }, [showDelta]);
 
   // Always-fresh refs — avoid stale closures in chart subscriptions
   const drawBubblesRef = useRef(drawBubbles);
@@ -298,7 +378,7 @@ const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
     } else {
       drawBubbles();
     }
-  }, [bubbles, selectedId, drawBubbles, showVolumeProfile, showContractQty]);
+  }, [bubbles, selectedId, drawBubbles, showVolumeProfile, showContractQty, showDeltaBubbles]);
 
   // Chart init
   useEffect(() => {
@@ -341,6 +421,19 @@ const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
       lastValueVisible: false,
     });
     vwapSeriesRef.current = vwapSeries;
+
+    // Delta histogram — occupies bottom ~18% of chart pane
+    const deltaSeries = chart.addHistogramSeries({
+      priceScaleId: 'delta',
+      color: 'rgba(34,197,94,0.70)',
+      priceFormat: { type: 'volume' },
+      lastValueVisible: false,
+      priceLineVisible: false,
+    });
+    chart.priceScale('delta').applyOptions({
+      scaleMargins: { top: 0.82, bottom: 0 },
+    });
+    deltaSeriesRef.current = deltaSeries;
 
     // Resize canvas on chart resize
     const ro = new ResizeObserver(() => {
@@ -401,14 +494,20 @@ const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
     () => ({
       addCandle(c: Candle) {
         candleSeriesRef.current?.update(c as CandlestickData);
+        const bar = candleDeltaBar(c);
+        if (bar) deltaSeriesRef.current?.update(bar);
         // Upsert into profile candles
         const arr = candlesForProfileRef.current;
         const idx = arr.findIndex((x) => (x.time as number) === (c.time as number));
         if (idx >= 0) arr[idx] = c;
         else arr.push(c);
+        // Redraw canvas AFTER array update so delta bubbles / volume profile see the new candle
+        drawBubblesRef.current();
       },
       updateCandle(c: Candle) {
         candleSeriesRef.current?.update(c as CandlestickData);
+        const bar = candleDeltaBar(c);
+        if (bar) deltaSeriesRef.current?.update(bar);
         // Update in-progress candle in profile array
         const arr = candlesForProfileRef.current;
         const idx = arr.findIndex((x) => (x.time as number) === (c.time as number));
@@ -417,11 +516,14 @@ const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
       },
       setCandles(cs: Candle[]) {
         candleSeriesRef.current?.setData(cs as CandlestickData[]);
+        const deltaData = cs.map(candleDeltaBar).filter((d): d is HistogramData => d !== null);
+        deltaSeriesRef.current?.setData(deltaData);
         candlesForProfileRef.current = [...cs];
       },
       clearChart() {
         candleSeriesRef.current?.setData([]);
         vwapSeriesRef.current?.setData([]);
+        deltaSeriesRef.current?.setData([]);
         candlesForProfileRef.current = [];
       },
       scrollToTime(time: number) {

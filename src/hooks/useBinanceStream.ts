@@ -31,7 +31,8 @@ interface BinanceKline {
   h: string;
   l: string;
   c: string;
-  v: string;
+  v: string; // total base asset volume
+  V: string; // taker buy base asset volume
 }
 
 interface ChartHandle {
@@ -125,6 +126,7 @@ export function useBinanceStream(
           low: parseFloat(k[3] as string),
           close: parseFloat(k[4] as string),
           volume: parseFloat(k[5] as string),
+          takerBuyVolume: parseFloat(k[9] as string),
         }));
 
         if (fresh.length > 0) {
@@ -232,6 +234,7 @@ export function useBinanceStream(
         low: parseFloat(k.l),
         close: parseFloat(k.c),
         volume: parseFloat(k.v),
+        takerBuyVolume: parseFloat(k.V),
       };
       candlesRef.current.set(candle.time as number, candle);
       currentCandleRef.current = candle;
@@ -365,5 +368,5 @@ export function useBinanceStream(
       setTradesLog(filtered);
     }
     rederive().catch(console.error);
-  }, [minUsdFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [minUsdFilter, showPatterns]); // eslint-disable-line react-hooks/exhaustive-deps
 }
