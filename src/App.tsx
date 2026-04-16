@@ -15,10 +15,17 @@ import { useMultiExchangePrice } from './hooks/useMultiExchangePrice';
 import { useMultiExchangeTrades } from './hooks/useMultiExchangeTrades';
 import type { UTCTimestamp } from 'lightweight-charts';
 
+export type VolEntry = { buyVol: number; sellVol: number };
+
 function App() {
   const chartRef = useRef<ChartHandle | null>(null);
   const detectorRef = useRef<Detector | null>(new Detector());
   const currentCandleRef = useRef<Candle | null>(null);
+  // Per-candle volume keyed by candle timestamp (seconds).
+  // binanceVolRef: set from kline REST history + live kline WS (complete OHLCV, overwritten each tick)
+  // extraVolRef:  accumulated from individual trades on all other exchanges (additive)
+  const binanceVolRef = useRef<Map<number, VolEntry>>(new Map());
+  const extraVolRef = useRef<Map<number, VolEntry>>(new Map());
 
   const anyPanelOpen = useStore(
     (s) => s.tradesPanelOpen || s.settingsPanelOpen || s.sessionPanelOpen,
@@ -29,7 +36,7 @@ function App() {
     detectorRef.current?.setThreshold(detectionThreshold);
   }, [detectionThreshold]);
 
-  useBinanceStream(chartRef, detectorRef, currentCandleRef);
+  useBinanceStream(chartRef, detectorRef, currentCandleRef, binanceVolRef);
 
   useMultiExchangePrice((point) => {
     // Anchor composite price line to current candle's open time — never runs ahead of candles
@@ -38,7 +45,7 @@ function App() {
     chartRef.current?.addVWAPPoint(t as UTCTimestamp, point.mid);
   });
 
-  useMultiExchangeTrades(detectorRef, currentCandleRef);
+  useMultiExchangeTrades(detectorRef, currentCandleRef, extraVolRef);
 
   return (
     <div className="app">
@@ -49,7 +56,7 @@ function App() {
       <div className="main">
         <div className="chart-wrap">
           <ErrorBoundary label="Chart">
-            <Chart ref={chartRef} />
+            <Chart ref={chartRef} binanceVolRef={binanceVolRef} extraVolRef={extraVolRef} />
           </ErrorBoundary>
           <Legend />
         </div>

@@ -18,6 +18,9 @@ export function openDB(): Promise<IDBDatabase> {
     };
     req.onsuccess = () => {
       _db = req.result;
+      // Reset singleton if the connection closes or errors — next call will reopen cleanly
+      _db.onclose = () => { _db = null; };
+      _db.onerror = () => { _db = null; };
       resolve(_db);
     };
     req.onerror = () => reject(req.error);
@@ -29,4 +32,21 @@ export function idbReq<T>(req: IDBRequest<T>): Promise<T> {
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
+}
+
+// Wipe all stores — use for full reset when data looks corrupted or stale
+export async function clearAllData(): Promise<void> {
+  const db = await openDB();
+  const stores = ['auto-trades', 'price-history', 'detector-state'] as const;
+  await Promise.all(
+    stores.map(
+      (store) =>
+        new Promise<void>((resolve, reject) => {
+          const tx = db.transaction(store, 'readwrite');
+          const req = tx.objectStore(store).clear();
+          req.onsuccess = () => resolve();
+          req.onerror = () => reject(req.error);
+        }),
+    ),
+  );
 }

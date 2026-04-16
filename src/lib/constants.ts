@@ -19,9 +19,9 @@ export const INTERVAL_MS: Record<string, number> = Object.fromEntries(
   Object.entries(INTERVAL_SECS).map(([k, v]) => [k, v * 1000]),
 );
 
-export const MAX_BUBBLES = 500;
-export const MAX_TRADES_LOG = 500;
-export const MAX_AUTO_CACHE = 500;
+export const MAX_BUBBLES = 5_000;
+export const MAX_TRADES_LOG = 5_000;
+export const MAX_AUTO_CACHE = 10_000;
 
 export const DEFAULT_SYMBOL = 'BTCUSDT';
 export const DEFAULT_INTERVAL = '1m';

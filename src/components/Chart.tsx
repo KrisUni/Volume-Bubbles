@@ -1,4 +1,5 @@
 import { useEffect, useRef, useImperativeHandle, forwardRef, useCallback } from 'react';
+import type React from 'react';
 import {
   createChart,
   ColorType,
@@ -10,7 +11,6 @@ import type {
   CandlestickData,
   UTCTimestamp,
   LineData,
-  HistogramData,
 } from 'lightweight-charts';
 import type { Candle, Bubble } from '../lib/types';
 import { useStore } from '../lib/config';
@@ -63,18 +63,6 @@ function heatColor(t: number, alpha: number): string {
   return `rgba(${r},${g},${b},${alpha.toFixed(2)})`;
 }
 
-// Delta bar: abs(buyVol - sellVol), green if net buy, red if net sell
-function candleDeltaBar(c: Candle): HistogramData | null {
-  if (c.takerBuyVolume === undefined || c.volume === undefined) return null;
-  const buyVol = c.takerBuyVolume;
-  const sellVol = c.volume - buyVol;
-  const delta = buyVol - sellVol;
-  return {
-    time: c.time,
-    value: Math.abs(delta),
-    color: delta >= 0 ? 'rgba(34,197,94,0.70)' : 'rgba(239,68,68,0.70)',
-  };
-}
 
 function signalColor(b: Bubble, alpha: number): string {
   // buyer = green, seller = red; pattern overrides
@@ -86,12 +74,17 @@ function signalColor(b: Bubble, alpha: number): string {
     : `rgba(34,197,94,${alpha})`; // buyer / aggressive = green
 }
 
-const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
+type VolEntry = { buyVol: number; sellVol: number };
+interface ChartProps {
+  binanceVolRef: React.RefObject<Map<number, VolEntry>>;
+  extraVolRef: React.RefObject<Map<number, VolEntry>>;
+}
+
+const Chart = forwardRef<ChartHandle, ChartProps>(function Chart({ binanceVolRef, extraVolRef }, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const vwapSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
-  const deltaSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animFrameRef = useRef<number | null>(null);
   const candlesForProfileRef = useRef<Candle[]>([]);
@@ -100,8 +93,15 @@ const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
   const selectedId = useStore((s) => s.selectedBubbleId);
   const showVolumeProfile = useStore((s) => s.showVolumeProfile);
   const showContractQty = useStore((s) => s.showContractQty);
-  const showDelta = useStore((s) => s.showDelta);
   const showDeltaBubbles = useStore((s) => s.showDeltaBubbles);
+
+  // Merge Binance kline volume + other-exchange accumulated volume for a candle timestamp
+  function getCrossVol(t: number): VolEntry | null {
+    const b = binanceVolRef.current.get(t);
+    const e = extraVolRef.current.get(t);
+    if (!b && !e) return null;
+    return { buyVol: (b?.buyVol ?? 0) + (e?.buyVol ?? 0), sellVol: (b?.sellVol ?? 0) + (e?.sellVol ?? 0) };
+  }
 
   // Draw volume profile from candle data as a left-edge overlay
   const drawVolumeProfile = useCallback((
@@ -132,7 +132,8 @@ const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
     for (const c of visible) {
       const low = c.low ?? c.close;
       const high = c.high ?? c.close;
-      const vol = c.volume ?? 0;
+      const crossVol = getCrossVol(c.time as number);
+      const vol = crossVol ? (crossVol.buyVol + crossVol.sellVol) : (c.volume ?? 0);
       if (vol === 0 || high === low) {
         // Point candle — add to nearest bin
         const i = Math.min(NUM_LEVELS - 1, Math.floor(((c.close - priceMin) / (priceMax - priceMin)) * NUM_LEVELS));
@@ -223,6 +224,11 @@ const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
 
     if (showDeltaBubbles) {
       // ── Delta bubble mode: one bubble per candle, sized by |buyVol - sellVol| ──
+      // Colors:
+      //   green  = net buy delta, bullish candle  (normal buy momentum)
+      //   red    = net sell delta, bearish candle (normal sell momentum)
+      //   cyan   = net sell delta, BULLISH candle (STRENGTH — sellers absorbed, price held)
+      //   orange = net buy delta, BEARISH candle  (WEAKNESS — buyers absorbed, price fell)
       const visibleRange = chart.timeScale().getVisibleRange();
       if (visibleRange) {
         const fromT = visibleRange.from as number;
@@ -231,23 +237,48 @@ const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
         for (const c of candlesForProfileRef.current) {
           const t = c.time as number;
           if (t < fromT || t > toT) continue;
-          if (c.takerBuyVolume === undefined || c.volume === undefined) continue;
+          const crossVol = getCrossVol(t);
+          const hasBinanceSplit = c.takerBuyVolume !== undefined && c.volume !== undefined;
+          if (!crossVol && !hasBinanceSplit) continue;
 
-          const buyVol = c.takerBuyVolume;
-          const sellVol = c.volume - buyVol;
+          const buyVol = crossVol ? crossVol.buyVol : c.takerBuyVolume!;
+          const sellVol = crossVol ? crossVol.sellVol : (c.volume! - c.takerBuyVolume!);
           const delta = buyVol - sellVol; // base asset units
           const deltaUsd = Math.abs(delta) * c.close;
-          if (deltaUsd < 5_000) continue; // skip noise
+          if (!isFinite(deltaUsd) || deltaUsd < 5_000) continue; // skip noise / NaN
 
           const x = ts.timeToCoordinate(c.time as UTCTimestamp);
-          // Positive delta → bubble at candle high (buyers pushed up); negative → at low
-          const yPrice = delta >= 0 ? c.high : c.low;
+          const isBuy = delta >= 0;
+          const isBullishCandle = c.close >= c.open;
+          // Divergence signals
+          const isStrength = !isBuy && isBullishCandle; // sellers couldn't push price down
+          const isWeakness = isBuy && !isBullishCandle; // buyers couldn't push price up
+
+          // Position: divergence → midpoint; aligned → high/low
+          const yPrice = isStrength || isWeakness
+            ? (c.high + c.low) / 2
+            : isBuy ? c.high : c.low;
           const y = candleSeries.priceToCoordinate(yPrice);
           if (x === null || y === null) continue;
 
-          const radius = bubbleRadius(deltaUsd);
-          const isBuy = delta >= 0;
-          const color = isBuy ? `rgba(34,197,94,0.82)` : `rgba(239,68,68,0.82)`;
+          // Radius capped at 40px for delta bubbles so they don't cover price action
+          const radius = Math.max(8, Math.min(40, (Math.log10(Math.max(deltaUsd, 10_000)) - 4) * 15));
+
+          // Color scheme
+          let color: string;
+          if (isStrength)      color = 'rgba(20,200,210,0.85)';  // cyan
+          else if (isWeakness) color = 'rgba(255,140,0,0.85)';   // orange
+          else if (isBuy)      color = 'rgba(34,197,94,0.82)';   // green
+          else                 color = 'rgba(239,68,68,0.82)';   // red
+
+          // Strength/weakness: outer ring for extra prominence
+          if (isStrength || isWeakness) {
+            ctx.beginPath();
+            ctx.arc(x, y, radius + 3, 0, Math.PI * 2);
+            ctx.strokeStyle = color.replace(/[\d.]+\)$/, '0.5)');
+            ctx.lineWidth = 2;
+            ctx.stroke();
+          }
 
           // fill
           ctx.beginPath();
@@ -255,19 +286,20 @@ const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
           ctx.fillStyle = color;
           ctx.fill();
 
-          // Δ label + formatted qty
+          // Label
           ctx.fillStyle = 'rgba(255,255,255,0.95)';
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
           if (radius >= 14) {
             const fontSize = Math.max(8, radius * 0.5);
+            const topLabel = isStrength ? 'STR' : isWeakness ? 'WEK' : 'Δ';
             ctx.font = `bold ${fontSize}px sans-serif`;
-            ctx.fillText('Δ', x, y - fontSize * 0.4);
+            ctx.fillText(topLabel, x, y - fontSize * 0.4);
             ctx.font = `${Math.max(7, fontSize * 0.8)}px sans-serif`;
             ctx.fillText(fmtQty(Math.abs(delta)), x, y + fontSize * 0.7);
           } else {
             ctx.font = `bold ${Math.max(8, radius * 0.6)}px sans-serif`;
-            ctx.fillText('Δ', x, y);
+            ctx.fillText(isStrength ? 'S' : isWeakness ? 'W' : 'Δ', x, y);
           }
         }
       }
@@ -338,11 +370,6 @@ const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
       }
     }
   }, [bubbles, selectedId, showVolumeProfile, showContractQty, showDeltaBubbles, drawVolumeProfile]);
-
-  // Show/hide delta series when toggle changes
-  useEffect(() => {
-    deltaSeriesRef.current?.applyOptions({ visible: showDelta });
-  }, [showDelta]);
 
   // Always-fresh refs — avoid stale closures in chart subscriptions
   const drawBubblesRef = useRef(drawBubbles);
@@ -422,19 +449,6 @@ const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
     });
     vwapSeriesRef.current = vwapSeries;
 
-    // Delta histogram — occupies bottom ~18% of chart pane
-    const deltaSeries = chart.addHistogramSeries({
-      priceScaleId: 'delta',
-      color: 'rgba(34,197,94,0.70)',
-      priceFormat: { type: 'volume' },
-      lastValueVisible: false,
-      priceLineVisible: false,
-    });
-    chart.priceScale('delta').applyOptions({
-      scaleMargins: { top: 0.82, bottom: 0 },
-    });
-    deltaSeriesRef.current = deltaSeries;
-
     // Resize canvas on chart resize
     const ro = new ResizeObserver(() => {
       chart.resize(container.clientWidth, container.clientHeight);
@@ -493,9 +507,8 @@ const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
     ref,
     () => ({
       addCandle(c: Candle) {
-        candleSeriesRef.current?.update(c as CandlestickData);
-        const bar = candleDeltaBar(c);
-        if (bar) deltaSeriesRef.current?.update(bar);
+        try { candleSeriesRef.current?.update(c as CandlestickData); }
+        catch (e) { console.warn('addCandle error:', e); return; }
         // Upsert into profile candles
         const arr = candlesForProfileRef.current;
         const idx = arr.findIndex((x) => (x.time as number) === (c.time as number));
@@ -505,9 +518,8 @@ const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
         drawBubblesRef.current();
       },
       updateCandle(c: Candle) {
-        candleSeriesRef.current?.update(c as CandlestickData);
-        const bar = candleDeltaBar(c);
-        if (bar) deltaSeriesRef.current?.update(bar);
+        try { candleSeriesRef.current?.update(c as CandlestickData); }
+        catch (e) { console.warn('updateCandle error:', e); return; }
         // Update in-progress candle in profile array
         const arr = candlesForProfileRef.current;
         const idx = arr.findIndex((x) => (x.time as number) === (c.time as number));
@@ -516,14 +528,11 @@ const Chart = forwardRef<ChartHandle, object>(function Chart(_, ref) {
       },
       setCandles(cs: Candle[]) {
         candleSeriesRef.current?.setData(cs as CandlestickData[]);
-        const deltaData = cs.map(candleDeltaBar).filter((d): d is HistogramData => d !== null);
-        deltaSeriesRef.current?.setData(deltaData);
         candlesForProfileRef.current = [...cs];
       },
       clearChart() {
         candleSeriesRef.current?.setData([]);
         vwapSeriesRef.current?.setData([]);
-        deltaSeriesRef.current?.setData([]);
         candlesForProfileRef.current = [];
       },
       scrollToTime(time: number) {

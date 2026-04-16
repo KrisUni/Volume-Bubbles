@@ -1,4 +1,6 @@
+import { useState } from 'react';
 import { useStore } from '../lib/config';
+import { clearAllData } from '../lib/db';
 
 export default function SettingsPanel() {
   const settingsPanelOpen = useStore((s) => s.settingsPanelOpen);
@@ -8,17 +10,29 @@ export default function SettingsPanel() {
   const minUsdFilter = useStore((s) => s.minUsdFilter);
   const showContractQty = useStore((s) => s.showContractQty);
   const showVolumeProfile = useStore((s) => s.showVolumeProfile);
-  const showDelta = useStore((s) => s.showDelta);
   const showDeltaBubbles = useStore((s) => s.showDeltaBubbles);
   const setShowPatterns = useStore((s) => s.setShowPatterns);
   const setAutoLoadTrades = useStore((s) => s.setAutoLoadTrades);
   const setDetectionThreshold = useStore((s) => s.setDetectionThreshold);
   const setMinUsdFilter = useStore((s) => s.setMinUsdFilter);
   const setShowContractQty = useStore((s) => s.setShowContractQty);
-  const setShowDelta = useStore((s) => s.setShowDelta);
   const setShowDeltaBubbles = useStore((s) => s.setShowDeltaBubbles);
   const setShowVolumeProfile = useStore((s) => s.setShowVolumeProfile);
   const closePanel = useStore((s) => s.closePanel);
+
+  const [resetting, setResetting] = useState(false);
+
+  async function handleResetDB() {
+    if (!confirm('Clear all cached trades and candle history? This cannot be undone.')) return;
+    setResetting(true);
+    try {
+      await clearAllData();
+      useStore.getState().clearBubbles();
+      useStore.getState().clearTradesLog();
+    } finally {
+      setResetting(false);
+    }
+  }
 
   if (!settingsPanelOpen) return null;
 
@@ -127,16 +141,6 @@ export default function SettingsPanel() {
           <span>Show volume profile</span>
         </label>
 
-        {/* ── Delta volume histogram ── */}
-        <label className="setting-row">
-          <input
-            type="checkbox"
-            checked={showDelta}
-            onChange={(e) => setShowDelta(e.target.checked)}
-          />
-          <span>Show delta histogram</span>
-        </label>
-
         {/* ── Delta bubble mode ── */}
         <label className="setting-row">
           <input
@@ -156,6 +160,30 @@ export default function SettingsPanel() {
           />
           <span>Auto-load previous trades on startup</span>
         </label>
+
+        {/* ── Danger zone ── */}
+        <div className="setting-group" style={{ marginTop: 16 }}>
+          <div className="setting-group-label" style={{ color: 'rgba(239,68,68,0.85)' }}>Data</div>
+          <button
+            onClick={handleResetDB}
+            disabled={resetting}
+            style={{
+              width: '100%',
+              padding: '6px 0',
+              background: 'rgba(239,68,68,0.15)',
+              border: '1px solid rgba(239,68,68,0.4)',
+              borderRadius: 4,
+              color: 'rgba(239,68,68,0.9)',
+              cursor: resetting ? 'default' : 'pointer',
+              fontSize: 13,
+            }}
+          >
+            {resetting ? 'Clearing…' : 'Clear all cached data'}
+          </button>
+          <div className="setting-hint" style={{ marginTop: 4 }}>
+            Wipes trades, candle history, and detector state. Reload after.
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -42,10 +42,13 @@ interface ChartHandle {
   clearChart: () => void;
 }
 
+type VolEntry = { buyVol: number; sellVol: number };
+
 export function useBinanceStream(
   chartRef: React.RefObject<ChartHandle | null>,
   detectorRef: React.RefObject<Detector | null>,
   currentCandleRef: React.RefObject<Candle | null>,
+  binanceVolRef: React.RefObject<Map<number, VolEntry>>,
 ): void {
   const symbol = useStore((s) => s.symbol);
   const interval = useStore((s) => s.interval);
@@ -71,6 +74,7 @@ export function useBinanceStream(
     detectorRef.current?.reset();
     candlesRef.current = new Map();
     currentCandleRef.current = null;
+    binanceVolRef.current.clear();
 
     let cancelled = false;
 
@@ -96,7 +100,12 @@ export function useBinanceStream(
       const stored = await loadPriceHistory(symbol, interval);
 
       if (stored.length > 0) {
-        for (const c of stored) candlesRef.current.set(c.time as number, c);
+        for (const c of stored) {
+          candlesRef.current.set(c.time as number, c);
+          if (c.takerBuyVolume !== undefined && c.volume !== undefined) {
+            binanceVolRef.current.set(c.time as number, { buyVol: c.takerBuyVolume, sellVol: c.volume - c.takerBuyVolume });
+          }
+        }
         chartRef.current?.setCandles(stored);
         currentCandleRef.current = stored[stored.length - 1] ?? null;
       }
@@ -119,18 +128,31 @@ export function useBinanceStream(
         const raw: unknown[][] = await resp.json();
         if (cancelled) return;
 
-        const fresh: Candle[] = raw.map((k) => ({
-          time: (Math.floor((k[0] as number) / 1000)) as UTCTimestamp,
-          open: parseFloat(k[1] as string),
-          high: parseFloat(k[2] as string),
-          low: parseFloat(k[3] as string),
-          close: parseFloat(k[4] as string),
-          volume: parseFloat(k[5] as string),
-          takerBuyVolume: parseFloat(k[9] as string),
-        }));
+        const fresh: Candle[] = raw
+          .map((k) => {
+            const open  = parseFloat(k[1] as string);
+            const high  = parseFloat(k[2] as string);
+            const low   = parseFloat(k[3] as string);
+            const close = parseFloat(k[4] as string);
+            if (!isFinite(open) || !isFinite(high) || !isFinite(low) || !isFinite(close)) return null;
+            const vol = parseFloat(k[5] as string);
+            const tbv = parseFloat(k[9] as string);
+            return {
+              time: (Math.floor((k[0] as number) / 1000)) as UTCTimestamp,
+              open, high, low, close,
+              volume: isFinite(vol) ? vol : 0,
+              takerBuyVolume: isFinite(tbv) ? tbv : undefined,
+            };
+          })
+          .filter((c): c is Candle => c !== null);
 
         if (fresh.length > 0) {
-          for (const c of fresh) candlesRef.current.set(c.time as number, c);
+          for (const c of fresh) {
+            candlesRef.current.set(c.time as number, c);
+            if (c.takerBuyVolume !== undefined && c.volume !== undefined) {
+              binanceVolRef.current.set(c.time as number, { buyVol: c.takerBuyVolume, sellVol: c.volume - c.takerBuyVolume });
+            }
+          }
           const all = Array.from(candlesRef.current.values()).sort(
             (a, b) => (a.time as number) - (b.time as number),
           );
@@ -227,14 +249,23 @@ export function useBinanceStream(
     }
 
     function handleKline(k: BinanceKline & { x?: boolean }) {
+      const open  = parseFloat(k.o);
+      const high  = parseFloat(k.h);
+      const low   = parseFloat(k.l);
+      const close = parseFloat(k.c);
+      // Guard: lightweight-charts throws "Value is null" if any OHLC is NaN
+      if (!isFinite(open) || !isFinite(high) || !isFinite(low) || !isFinite(close)) return;
+
+      const vol = parseFloat(k.v);
+      const tbv = parseFloat(k.V);
       const candle: Candle = {
         time: (Math.floor(k.t / 1000)) as UTCTimestamp,
-        open: parseFloat(k.o),
-        high: parseFloat(k.h),
-        low: parseFloat(k.l),
-        close: parseFloat(k.c),
-        volume: parseFloat(k.v),
-        takerBuyVolume: parseFloat(k.V),
+        open,
+        high,
+        low,
+        close,
+        volume: isFinite(vol) ? vol : 0,
+        takerBuyVolume: isFinite(tbv) ? tbv : undefined,
       };
       candlesRef.current.set(candle.time as number, candle);
       currentCandleRef.current = candle;
@@ -364,9 +395,34 @@ export function useBinanceStream(
           birthMs: 0,
         };
       });
-      replaceBubbles(rederived); // direct replace — no merge, so filtered-out bubbles don't leak back
+      // Merge: live bubbles (birthMs > 0) that arrived during the async DB read
+      // won't be in `rederived` yet (DB write is async). Keep them so they don't disappear.
+      const currentBubbles = useStore.getState().bubbles;
+      const liveNotInDB = currentBubbles.filter(
+        (b) => b.birthMs > 0 && !rederived.some((r) => r.id === b.id),
+      );
+      replaceBubbles([...rederived, ...liveNotInDB]);
       setTradesLog(filtered);
     }
     rederive().catch(console.error);
   }, [minUsdFilter, showPatterns]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // When showPatterns toggles, reclassify bubbles already in state (no DB round-trip needed).
+  // This handles the case where autoLoadTrades=false — the rederive effect skips, but we still
+  // need to strip/restore patterns on the live bubbles that are currently visible.
+  useEffect(() => {
+    const store = useStore.getState();
+    const reclassified = store.bubbles.map((b) => {
+      // b.time is already the candle-bucket timestamp
+      const candle = candlesRef.current.get(b.time);
+      const classification = (candle && showPatterns)
+        ? classifyTrade(
+            { trade: { price: b.price, qty: b.qty, isMaker: b.isMaker, timestamp: b.time * 1000 }, usdValue: b.usdValue, zscore: 0 },
+            candle,
+          )
+        : { pattern: undefined, patternSignal: undefined };
+      return { ...b, pattern: classification.pattern, patternSignal: classification.patternSignal };
+    });
+    store.replaceBubbles(reclassified);
+  }, [showPatterns]); // eslint-disable-line react-hooks/exhaustive-deps
 }

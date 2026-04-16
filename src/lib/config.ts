@@ -11,10 +11,8 @@ export interface AppConfig {
   autoLoadTrades: boolean;
   detectionThreshold: number; // z-score cutoff, default 2.5
   minUsdFilter: number;       // hard min USD value per trade, 0 = disabled
-  minQtyFilter: number;       // hard min contract qty per trade, 0 = disabled
   showContractQty: boolean;   // render qty label on bubble
   showVolumeProfile: boolean; // render volume profile overlay on chart
-  showDelta: boolean;         // render delta volume histogram below candles
   showDeltaBubbles: boolean;  // replace trade bubbles with per-candle delta bubbles
 }
 
@@ -25,10 +23,8 @@ const CONFIG_DEFAULTS: AppConfig = {
   autoLoadTrades: true,
   detectionThreshold: 2.5,
   minUsdFilter: 0,
-  minQtyFilter: 0,
   showContractQty: false,
   showVolumeProfile: true,
-  showDelta: true,
   showDeltaBubbles: false,
 };
 
@@ -76,10 +72,8 @@ interface AppActions {
   setAutoLoadTrades: (v: boolean) => void;
   setDetectionThreshold: (v: number) => void;
   setMinUsdFilter: (v: number) => void;
-  setMinQtyFilter: (v: number) => void;
   setShowContractQty: (v: boolean) => void;
   setShowVolumeProfile: (v: boolean) => void;
-  setShowDelta: (v: boolean) => void;
   setShowDeltaBubbles: (v: boolean) => void;
   // exchange status
   setExchangeStatus: (exchange: string, status: ConnectionStatus) => void;
@@ -167,10 +161,8 @@ export const useStore = create<AppState>()(
       setAutoLoadTrades: (autoLoadTrades) => set({ autoLoadTrades }),
       setDetectionThreshold: (detectionThreshold) => set({ detectionThreshold }),
       setMinUsdFilter: (minUsdFilter) => set({ minUsdFilter }),
-      setMinQtyFilter: (minQtyFilter) => set({ minQtyFilter }),
       setShowContractQty: (showContractQty) => set({ showContractQty }),
       setShowVolumeProfile: (showVolumeProfile) => set({ showVolumeProfile }),
-      setShowDelta: (showDelta) => set({ showDelta }),
       setShowDeltaBubbles: (showDeltaBubbles) => set({ showDeltaBubbles }),
 
       // ── Exchange status ──
@@ -187,11 +179,9 @@ export const useStore = create<AppState>()(
         showPatterns: s.showPatterns,
         detectionThreshold: s.detectionThreshold,
         minUsdFilter: s.minUsdFilter,
-        minQtyFilter: s.minQtyFilter,
         autoLoadTrades: s.autoLoadTrades,
         showContractQty: s.showContractQty,
         showVolumeProfile: s.showVolumeProfile,
-        showDelta: s.showDelta,
         showDeltaBubbles: s.showDeltaBubbles,
       }),
     },
