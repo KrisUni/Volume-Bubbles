@@ -2,6 +2,7 @@ import { useRef, useEffect } from 'react';
 import { Detector } from './lib/detector';
 import type { Candle } from './lib/types';
 import type { ChartHandle } from './components/Chart';
+import type { VolEntry } from './lib/types';
 import Chart from './components/Chart';
 import Header from './components/Header';
 import SettingsPanel from './components/SettingsPanel';
@@ -14,8 +15,6 @@ import { useBinanceStream } from './hooks/useBinanceStream';
 import { useMultiExchangePrice } from './hooks/useMultiExchangePrice';
 import { useMultiExchangeTrades } from './hooks/useMultiExchangeTrades';
 import type { UTCTimestamp } from 'lightweight-charts';
-
-export type VolEntry = { buyVol: number; sellVol: number };
 
 function App() {
   const chartRef = useRef<ChartHandle | null>(null);

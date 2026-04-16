@@ -48,3 +48,5 @@ export interface ExchangeConnection {
 }
 
 export type OnStatus = (status: ConnectionStatus, exchange?: string) => void;
+
+export type VolEntry = { buyVol: number; sellVol: number };

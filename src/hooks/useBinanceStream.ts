@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import type { UTCTimestamp } from 'lightweight-charts';
-import type { Candle, Bubble } from '../lib/types';
+import type { Candle, Bubble, VolEntry } from '../lib/types';
+import type { ChartHandle } from '../components/Chart';
 import type { Detector } from '../lib/detector';
 import { classifyTrade } from '../lib/detector';
 import { useStore } from '../lib/config';
@@ -34,15 +35,6 @@ interface BinanceKline {
   v: string; // total base asset volume
   V: string; // taker buy base asset volume
 }
-
-interface ChartHandle {
-  addCandle: (c: Candle) => void;
-  updateCandle: (c: Candle) => void;
-  setCandles: (cs: Candle[]) => void;
-  clearChart: () => void;
-}
-
-type VolEntry = { buyVol: number; sellVol: number };
 
 export function useBinanceStream(
   chartRef: React.RefObject<ChartHandle | null>,
@@ -269,6 +261,9 @@ export function useBinanceStream(
       };
       candlesRef.current.set(candle.time as number, candle);
       currentCandleRef.current = candle;
+      if (isFinite(tbv) && isFinite(vol)) {
+        binanceVolRef.current.set(candle.time as number, { buyVol: tbv, sellVol: vol - tbv });
+      }
 
       if (k.x) {
         closedCandleRef.current = candle; // lock in final OHLC for classification

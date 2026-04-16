@@ -1,7 +1,5 @@
 import { useEffect, useRef } from 'react';
-import type { ExchangeConnection } from '../lib/types';
-import type { Bubble } from '../lib/types';
-import type { Candle } from '../lib/types';
+import type { ExchangeConnection, Bubble, Candle, VolEntry } from '../lib/types';
 import type { Detector } from '../lib/detector';
 import { classifyTrade } from '../lib/detector';
 import { useStore } from '../lib/config';
@@ -16,10 +14,10 @@ import type { RawTrade } from '../lib/detector';
 export function useMultiExchangeTrades(
   detectorRef: React.RefObject<Detector | null>,
   currentCandleRef: React.RefObject<Candle | null>,
+  extraVolRef: React.RefObject<Map<number, VolEntry>>,
 ): void {
   const symbol = useStore((s) => s.symbol);
   const interval = useStore((s) => s.interval);
-  const showPatterns = useStore((s) => s.showPatterns);
   const addBubble = useStore((s) => s.addBubble);
   const addToTradesLog = useStore((s) => s.addToTradesLog);
   const setExchangeStatus = useStore((s) => s.setExchangeStatus);
@@ -29,6 +27,7 @@ export function useMultiExchangeTrades(
   useEffect(() => {
     connectionsRef.current.forEach((c) => c.close());
     connectionsRef.current = [];
+    extraVolRef.current.clear();
 
     const intervalSecs = INTERVAL_SECS[interval] ?? 60;
 
@@ -36,22 +35,47 @@ export function useMultiExchangeTrades(
       const detector = detectorRef.current;
       if (!detector) return;
 
-      const candle = currentCandleRef.current;
-      if (!candle) return;
+      const candleTime =
+        Math.floor(trade.timestamp / 1000 / intervalSecs) * intervalSecs;
+
+      // Accumulate ALL trades into extraVolRef (base asset units) — same completeness as
+      // binanceVolRef which comes from klines. Only accumulating detected trades would
+      // undercount volume relative to Binance's aggregate kline data.
+      const existing = extraVolRef.current.get(candleTime) ?? { buyVol: 0, sellVol: 0 };
+      if (trade.isMaker) existing.sellVol += trade.qty;
+      else               existing.buyVol  += trade.qty;
+      extraVolRef.current.set(candleTime, existing);
 
       const result = detector.processTrade(trade);
       if (!result) return;
 
-      const { minUsdFilter } = useStore.getState();
-      if (minUsdFilter > 0 && result.usdValue < minUsdFilter) return;
+      const candle = currentCandleRef.current;
+      if (!candle) return;
+
+      const tradeTime = Math.floor(trade.timestamp / 1000);
+      const id = `${trade.exchange}-${trade.timestamp}-${trade.price}-${trade.qty}`;
+
+      // Read fresh from store — avoid stale closures (effect runs on [symbol, interval] only)
+      const { minUsdFilter, showPatterns } = useStore.getState();
 
       const classification = showPatterns ? classifyTrade(result, candle) : {};
 
-      const candleTime =
-        Math.floor(trade.timestamp / 1000 / intervalSecs) * intervalSecs;
-      const tradeTime = Math.floor(trade.timestamp / 1000);
+      const logEntry = {
+        id,
+        time: tradeTime,
+        price: trade.price,
+        qty: trade.qty,
+        usdValue: result.usdValue,
+        isMaker: trade.isMaker,
+        pattern: classification.pattern,
+        patternSignal: classification.patternSignal,
+        exchange: trade.exchange,
+      };
 
-      const id = `${trade.exchange}-${trade.timestamp}-${trade.price}-${trade.qty}`;
+      // Save ALL detected trades before display filter so loosening filter restores them
+      appendAutoCachedTrade(symbol, logEntry).catch(console.error);
+
+      if (minUsdFilter > 0 && result.usdValue < minUsdFilter) return;
 
       const bubble: Bubble = {
         id,
@@ -66,21 +90,8 @@ export function useMultiExchangeTrades(
         birthMs: Date.now(),
       };
 
-      const logEntry = {
-        id,
-        time: tradeTime,
-        price: trade.price,
-        qty: trade.qty,
-        usdValue: result.usdValue,
-        isMaker: trade.isMaker,
-        pattern: classification.pattern,
-        patternSignal: classification.patternSignal,
-        exchange: trade.exchange,
-      };
-
       addBubble(bubble);
       addToTradesLog(logEntry);
-      appendAutoCachedTrade(symbol, logEntry).catch(console.error);
     }
 
     function onStatus(exchange: string) {

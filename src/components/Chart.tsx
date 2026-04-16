@@ -12,7 +12,7 @@ import type {
   UTCTimestamp,
   LineData,
 } from 'lightweight-charts';
-import type { Candle, Bubble } from '../lib/types';
+import type { Candle, Bubble, VolEntry } from '../lib/types';
 import { useStore } from '../lib/config';
 import { INTERVAL_SECS } from '../lib/constants';
 
@@ -74,7 +74,6 @@ function signalColor(b: Bubble, alpha: number): string {
     : `rgba(34,197,94,${alpha})`; // buyer / aggressive = green
 }
 
-type VolEntry = { buyVol: number; sellVol: number };
 interface ChartProps {
   binanceVolRef: React.RefObject<Map<number, VolEntry>>;
   extraVolRef: React.RefObject<Map<number, VolEntry>>;
